@@ -99,4 +99,61 @@ final class SlimEndpointDiscovererTest extends TestCase
         $ast = $this->parser->parse($code);
         $this->assertTrue($this->discoverer->supports($ast, 'routes.php'));
     }
+
+    public function testDoesNotMatchSingleArgumentGet(): void
+    {
+        $code = '<?php $request->session()->get("status");';
+        $ast = $this->parser->parse($code);
+        $this->assertFalse($this->discoverer->supports($ast, 'controller.php'));
+    }
+
+    public function testDoesNotDiscoverFalsePositiveEndpoints(): void
+    {
+        $code = '<?php
+            $request->session()->get("status");
+            $cache->get("some_key");
+            $collection->get("item");
+            $config->get("database.host", "localhost");
+        ';
+        $ast = $this->parser->parse($code);
+        $endpoints = $this->discoverer->discover($ast, 'service.php');
+        $this->assertCount(0, $endpoints);
+    }
+
+    public function testDiscoversMapRoute(): void
+    {
+        $code = '<?php $app->map(["GET", "POST"], "/api/users", function ($req, $res) {});';
+        $ast = $this->parser->parse($code);
+        $endpoints = $this->discoverer->discover($ast, 'routes.php');
+
+        $this->assertCount(1, $endpoints);
+        $this->assertEquals('/api/users', $endpoints[0]->route);
+        $this->assertContains(HttpMethod::GET, $endpoints[0]->methods);
+        $this->assertContains(HttpMethod::POST, $endpoints[0]->methods);
+    }
+
+    public function testDiscoversRouteWithInvokableClassStringHandler(): void
+    {
+        $code = '<?php $app->any("/user", "MyRestfulController");';
+        $ast = $this->parser->parse($code);
+        $endpoints = $this->discoverer->discover($ast, 'routes.php');
+
+        $this->assertCount(1, $endpoints);
+        $this->assertEquals('/user', $endpoints[0]->route);
+    }
+
+    public function testDiscoversEmptyPathRouteInsideGroup(): void
+    {
+        $code = '<?php
+            $app->group("/users/{id}", function ($group) {
+                $group->map(["GET", "DELETE"], "", function ($req, $res) {});
+            });
+        ';
+        $ast = $this->parser->parse($code);
+        $endpoints = $this->discoverer->discover($ast, 'routes.php');
+
+        $this->assertCount(1, $endpoints);
+        $this->assertContains(HttpMethod::GET, $endpoints[0]->methods);
+        $this->assertContains(HttpMethod::DELETE, $endpoints[0]->methods);
+    }
 }

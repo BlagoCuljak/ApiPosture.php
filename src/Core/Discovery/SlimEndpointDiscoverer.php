@@ -35,7 +35,9 @@ final class SlimEndpointDiscoverer implements EndpointDiscovererInterface
         $groupCalls = $finder->find($ast, function (Node $node) {
             return $node instanceof Expr\MethodCall
                 && $node->name instanceof Node\Identifier
-                && $node->name->toString() === 'group';
+                && $node->name->toString() === 'group'
+                && count($node->getArgs()) >= 2
+                && $this->isSlimRoutePath($node->getArgs()[0]->value);
         });
 
         return count($groupCalls) > 0;
@@ -79,14 +81,30 @@ final class SlimEndpointDiscoverer implements EndpointDiscovererInterface
             return false;
         }
 
-        // Must have at least a path argument
-        if (count($node->getArgs()) < 1) {
+        $args = $node->getArgs();
+
+        // map() signature: map(array $methods, string $path, callable $handler)
+        if ($methodName === 'map') {
+            return count($args) >= 3
+                && $args[0]->value instanceof Expr\Array_
+                && $this->isSlimRoutePath($args[1]->value);
+        }
+
+        // All other methods: get/post/put/delete/patch/any
+        // Signature: (string $path, handler), always 2+ args
+        return count($args) >= 2
+            && $this->isSlimRoutePath($args[0]->value);
+    }
+
+    private function isSlimRoutePath(Node $node): bool
+    {
+        if (!$node instanceof Node\Scalar\String_) {
             return false;
         }
 
-        // First arg should be a string (the path)
-        $firstArg = $node->getArgs()[0]->value;
-        return $firstArg instanceof Node\Scalar\String_;
+        // Slim route patterns are always either empty (used inside groups)
+        // or start with '/' - this is the only way to define a route.
+        return $node->value === '' || str_starts_with($node->value, '/');
     }
 
     private function parseRouteCall(Expr\MethodCall $call, string $filePath, array $groups): ?Endpoint
@@ -99,7 +117,11 @@ final class SlimEndpointDiscoverer implements EndpointDiscovererInterface
         }
 
         $path = null;
-        if ($args[0]->value instanceof Node\Scalar\String_) {
+        if ($methodName === 'map') {
+            if (isset($args[1]) && $args[1]->value instanceof Node\Scalar\String_) {
+                $path = $args[1]->value->value;
+            }
+        } elseif ($args[0]->value instanceof Node\Scalar\String_) {
             $path = $args[0]->value->value;
         }
 

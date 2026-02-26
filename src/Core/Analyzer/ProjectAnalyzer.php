@@ -8,6 +8,7 @@ use ApiPosture\Core\Classification\SecurityClassifier;
 use ApiPosture\Core\Config\Configuration;
 use ApiPosture\Core\Discovery\EndpointDiscovererInterface;
 use ApiPosture\Core\Discovery\LaravelEndpointDiscoverer;
+use ApiPosture\Core\Discovery\PlainPhpEndpointDiscoverer;
 use ApiPosture\Core\Discovery\SlimEndpointDiscoverer;
 use ApiPosture\Core\Discovery\SymfonyEndpointDiscoverer;
 use ApiPosture\Core\Model\Endpoint;
@@ -40,6 +41,7 @@ final class ProjectAnalyzer
             new LaravelEndpointDiscoverer(),
             new SymfonyEndpointDiscoverer(),
             new SlimEndpointDiscoverer(),
+            new PlainPhpEndpointDiscoverer(),
         ];
         $this->classifier = new SecurityClassifier();
         $this->ruleEngine = new RuleEngine($configuration);

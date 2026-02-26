@@ -9,4 +9,5 @@ enum EndpointType: string
     case Controller = 'controller';
     case Route = 'route';
     case Annotation = 'annotation';
+    case File = 'file';
 }

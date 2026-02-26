@@ -1,0 +1,32 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+// Find autoloader
+$autoloadPaths = [
+    __DIR__ . '/../vendor/autoload.php',       // When run from source
+    __DIR__ . '/../../../autoload.php',         // When installed as dependency
+];
+
+$autoloaderFound = false;
+foreach ($autoloadPaths as $autoloadPath) {
+    if (file_exists($autoloadPath)) {
+        require $autoloadPath;
+        $autoloaderFound = true;
+        break;
+    }
+}
+
+if (!$autoloaderFound) {
+    fwrite(STDERR, "Could not find autoloader. Run 'composer install' first.\n");
+    exit(1);
+}
+
+use ApiPosture\Command\ScanCommand;
+use Symfony\Component\Console\Application;
+
+$application = new Application('ApiPosture', '0.1.0');
+$application->add(new ScanCommand());
+$application->setDefaultCommand('scan', true);
+$application->run();

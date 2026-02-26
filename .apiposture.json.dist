@@ -1,0 +1,21 @@
+{
+    "severity": {
+        "default": "info",
+        "failOn": "high"
+    },
+    "suppressions": [],
+    "rules": {
+        "AP001": { "enabled": true },
+        "AP002": { "enabled": true },
+        "AP003": { "enabled": true },
+        "AP004": { "enabled": true },
+        "AP005": { "enabled": true },
+        "AP006": { "enabled": true },
+        "AP007": { "enabled": true },
+        "AP008": { "enabled": true }
+    },
+    "display": {
+        "useColors": true,
+        "useIcons": true
+    }
+}

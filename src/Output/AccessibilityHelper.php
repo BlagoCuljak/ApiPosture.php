@@ -17,40 +17,6 @@ final class AccessibilityHelper
     private readonly bool $useColors;
     private readonly bool $useIcons;
 
-    // Severity emoji icons
-    private const SEVERITY_ICONS = [
-        Severity::Critical->value => "\u{274C}",      // Red X
-        Severity::High->value     => "\u{26A0}\u{FE0F}", // Warning sign
-        Severity::Medium->value   => "\u{26A1}",       // Lightning bolt
-        Severity::Low->value      => "\u{2139}\u{FE0F}", // Info
-        Severity::Info->value     => "\u{2139}\u{FE0F}", // Info
-    ];
-
-    // Severity text fallbacks matching .NET reference
-    private const SEVERITY_LABELS = [
-        Severity::Critical->value => '[CRIT]',
-        Severity::High->value     => '[HIGH]',
-        Severity::Medium->value   => '[MED]',
-        Severity::Low->value      => '[LOW]',
-        Severity::Info->value     => '[INFO]',
-    ];
-
-    // Classification emoji icons
-    private const CLASSIFICATION_ICONS = [
-        SecurityClassification::Public->value          => "\u{1F513}", // Unlocked
-        SecurityClassification::Authenticated->value   => "\u{1F510}", // Lock with key
-        SecurityClassification::RoleRestricted->value  => "\u{1F512}", // Locked
-        SecurityClassification::PolicyRestricted->value => "\u{1F6E1}", // Shield
-    ];
-
-    // Classification text fallbacks matching .NET reference
-    private const CLASSIFICATION_LABELS = [
-        SecurityClassification::Public->value          => '[PUBLIC]',
-        SecurityClassification::Authenticated->value   => '[AUTH]',
-        SecurityClassification::RoleRestricted->value  => '[ROLE]',
-        SecurityClassification::PolicyRestricted->value => '[POLICY]',
-    ];
-
     public function __construct(bool $useColors = true, bool $useIcons = true)
     {
         $this->useColors = $useColors;
@@ -107,20 +73,42 @@ final class AccessibilityHelper
     public function getSeverityIndicator(Severity $severity): string
     {
         if ($this->useIcons) {
-            return self::SEVERITY_ICONS[$severity->value] ?? '?';
+            return match ($severity) {
+                Severity::Critical => "\u{274C}",            // Red X
+                Severity::High     => "\u{26A0}\u{FE0F}",   // Warning sign
+                Severity::Medium   => "\u{26A1}",            // Lightning bolt
+                Severity::Low      => "\u{2139}\u{FE0F}",   // Info
+                Severity::Info     => "\u{2139}\u{FE0F}",   // Info
+            };
         }
-        return self::SEVERITY_LABELS[$severity->value] ?? '[?]';
+        return match ($severity) {
+            Severity::Critical => '[CRIT]',
+            Severity::High     => '[HIGH]',
+            Severity::Medium   => '[MED]',
+            Severity::Low      => '[LOW]',
+            Severity::Info     => '[INFO]',
+        };
     }
 
     public function getClassificationIndicator(SecurityClassification $classification): string
     {
         if ($this->useIcons) {
-            return self::CLASSIFICATION_ICONS[$classification->value] ?? '?';
+            return match ($classification) {
+                SecurityClassification::Public          => "\u{1F513}", // Unlocked
+                SecurityClassification::Authenticated   => "\u{1F510}", // Lock with key
+                SecurityClassification::RoleRestricted  => "\u{1F512}", // Locked
+                SecurityClassification::PolicyRestricted => "\u{1F6E1}", // Shield
+            };
         }
-        return self::CLASSIFICATION_LABELS[$classification->value] ?? '[?]';
+        return match ($classification) {
+            SecurityClassification::Public          => '[PUBLIC]',
+            SecurityClassification::Authenticated   => '[AUTH]',
+            SecurityClassification::RoleRestricted  => '[ROLE]',
+            SecurityClassification::PolicyRestricted => '[POLICY]',
+        };
     }
 
-    public function getSuccessIndicator(): string  { return $this->useIcons ? "\u{2705}" : '[OK]'; }
-    public function getFailureIndicator(): string  { return $this->useIcons ? "\u{274C}"  : '[FAIL]'; }
-    public function getWarningIndicator(): string  { return $this->useIcons ? "\u{26A0}\u{FE0F}" : '[WARN]'; }
+    public function getSuccessIndicator(): string { return $this->useIcons ? "\u{2705}" : '[OK]'; }
+    public function getFailureIndicator(): string { return $this->useIcons ? "\u{274C}"  : '[FAIL]'; }
+    public function getWarningIndicator(): string { return $this->useIcons ? "\u{26A0}\u{FE0F}" : '[WARN]'; }
 }

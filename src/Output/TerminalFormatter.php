@@ -37,35 +37,35 @@ final class TerminalFormatter implements OutputFormatterInterface
             $buffer->setDecorated(false);
         }
 
-        $this->renderHeader($buffer, $result);
-        $this->renderSummary($buffer, $result);
-
-        if (!empty($result->endpoints)) {
-            $this->renderEndpoints($buffer, $result, $options);
-        }
-
-        if (!empty($result->findings)) {
-            $this->renderFindings($buffer, $result, $options);
-        }
-
-        if (!empty($result->failedFiles)) {
-            $this->renderFailedFiles($buffer, $result);
-        }
+        $this->renderOutput($buffer, $result, $options);
 
         return $buffer->fetch();
     }
 
     public function formatToOutput(OutputInterface $output, ScanResult $result, array $options = []): void
     {
+        $this->renderOutput($output, $result, $options);
+    }
+
+    private function renderOutput(OutputInterface $output, ScanResult $result, array $options): void
+    {
+        // Findings FIRST — so scrolling up from the bottom shows details
+        if (!empty($result->findings)) {
+            $this->renderFindings($output, $result, $options);
+        }
+
+        // Scroll hint separator
+        if (!empty($result->findings)) {
+            $output->writeln('<comment>^^^^ Scroll up for finding details ^^^^</comment>');
+            $output->writeln('');
+        }
+
         $this->renderHeader($output, $result);
         $this->renderSummary($output, $result);
 
+        // Endpoints at BOTTOM — visible immediately when scan completes
         if (!empty($result->endpoints)) {
             $this->renderEndpoints($output, $result, $options);
-        }
-
-        if (!empty($result->findings)) {
-            $this->renderFindings($output, $result, $options);
         }
 
         if (!empty($result->failedFiles)) {

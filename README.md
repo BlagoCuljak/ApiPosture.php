@@ -24,20 +24,46 @@ A CLI security inspection tool for PHP APIs. Performs static source-code analysi
 ## Installation
 
 ```bash
-# Install as a project dependency
-composer require --dev apiposture/apiposture
-
-# Or install globally
+# Install globally (recommended — scan any project from anywhere)
 composer global require apiposture/apiposture
+
+# Or install as a dev dependency inside your project
+composer require --dev apiposture/apiposture
 ```
+
+> **Global install tip:** After `composer global require`, make sure Composer's global bin directory is on your `PATH`.
+> The location varies by system — find yours with `composer global config bin-dir --absolute`, then add it:
+> ```bash
+> # Modern Linux / macOS (Composer 2.x)
+> export PATH="$PATH:$HOME/.config/composer/vendor/bin"
+>
+> # Older Linux / macOS
+> export PATH="$PATH:$HOME/.composer/vendor/bin"
+>
+> # Add whichever applies to ~/.bashrc or ~/.zshrc to make it permanent
+> ```
+> Then run `apiposture scan /path/to/project` from anywhere.
+
+> **Project install tip:** `vendor/bin/apiposture` must be run from the directory where you ran `composer require` (where the `vendor/` folder lives). Pass the target path as an argument:
+> ```bash
+> # Installed in ~/myapp, scanning a subdirectory
+> cd ~/myapp
+> vendor/bin/apiposture scan src/Controller
+>
+> # Scanning a completely separate project
+> vendor/bin/apiposture scan /path/to/other-project
+> ```
 
 ## Usage
 
 ```bash
-# Scan a project directory
-vendor/bin/apiposture scan ./app
+# Scan a project directory (global install)
+apiposture scan /path/to/project
 
-# Scan specific directory
+# Scan a project directory (project install — run from vendor root)
+vendor/bin/apiposture scan /path/to/project
+
+# Scan a subdirectory
 vendor/bin/apiposture scan ./src/Controller
 
 # Output as JSON

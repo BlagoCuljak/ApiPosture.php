@@ -15,15 +15,25 @@ use Symfony\Component\Console\Output\OutputInterface;
 
 final class TerminalFormatter implements OutputFormatterInterface
 {
+    private readonly AccessibilityHelper $accessibility;
+
     public function __construct(
-        private readonly bool $useColors = true,
-        private readonly bool $useIcons = true,
-    ) {}
+        bool $useColors = true,
+        bool $useIcons = true,
+    ) {
+        // noColorFlag / noIconsFlag = true means the caller already disabled the feature.
+        // When false, AccessibilityHelper auto-detects NO_COLOR, TTY redirect,
+        // and Windows WT_SESSION on top.
+        $this->accessibility = AccessibilityHelper::create(
+            noColorFlag: !$useColors,
+            noIconsFlag: !$useIcons,
+        );
+    }
 
     public function format(ScanResult $result, array $options = []): string
     {
         $buffer = new BufferedOutput();
-        if (!$this->useColors) {
+        if (!$this->accessibility->useColors()) {
             $buffer->setDecorated(false);
         }
 
@@ -65,7 +75,7 @@ final class TerminalFormatter implements OutputFormatterInterface
 
     private function renderHeader(OutputInterface $output, ScanResult $result): void
     {
-        $icon = $this->useIcons ? '🔍 ' : '';
+        $icon = $this->accessibility->useIcons() ? '🔍 ' : '';
         $output->writeln('');
         $output->writeln("{$icon}<info>ApiPosture Scan Results</info>");
         $output->writeln(str_repeat('─', 60));
@@ -77,7 +87,7 @@ final class TerminalFormatter implements OutputFormatterInterface
 
     private function renderSummary(OutputInterface $output, ScanResult $result): void
     {
-        $endpointIcon = $this->useIcons ? '📊 ' : '';
+        $endpointIcon = $this->accessibility->useIcons() ? '📊 ' : '';
         $output->writeln("{$endpointIcon}<info>Summary</info>");
 
         $table = new Table($output);
@@ -100,7 +110,7 @@ final class TerminalFormatter implements OutputFormatterInterface
 
     private function renderEndpoints(OutputInterface $output, ScanResult $result, array $options): void
     {
-        $icon = $this->useIcons ? '🌐 ' : '';
+        $icon = $this->accessibility->useIcons() ? '🌐 ' : '';
         $output->writeln("{$icon}<info>Endpoints</info>");
 
         $groupBy = $options['groupBy'] ?? null;
@@ -147,7 +157,7 @@ final class TerminalFormatter implements OutputFormatterInterface
 
     private function renderFindings(OutputInterface $output, ScanResult $result, array $options): void
     {
-        $icon = $this->useIcons ? '⚠️  ' : '';
+        $icon = $this->accessibility->useIcons() ? '⚠️  ' : '';
         $output->writeln("{$icon}<info>Findings</info>");
 
         $groupFindingsBy = $options['groupFindingsBy'] ?? null;
@@ -184,7 +194,7 @@ final class TerminalFormatter implements OutputFormatterInterface
 
     private function renderFailedFiles(OutputInterface $output, ScanResult $result): void
     {
-        $icon = $this->useIcons ? '❌ ' : '';
+        $icon = $this->accessibility->useIcons() ? '❌ ' : '';
         $output->writeln("{$icon}<error>Failed Files</error>");
         foreach ($result->failedFiles as $file) {
             $output->writeln("  - {$file}");
@@ -194,13 +204,8 @@ final class TerminalFormatter implements OutputFormatterInterface
 
     private function severityLabel(Severity $severity): string
     {
-        $icon = $this->useIcons ? match ($severity) {
-            Severity::Critical => '🔴',
-            Severity::High => '🟠',
-            Severity::Medium => '🟡',
-            Severity::Low => '🔵',
-            Severity::Info => 'ℹ️',
-        } . ' ' : '';
+        $indicator = $this->accessibility->getSeverityIndicator($severity);
+        $icon = $indicator . ' ';
 
         $colorTag = match ($severity) {
             Severity::Critical => 'error',

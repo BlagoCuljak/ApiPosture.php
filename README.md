@@ -9,6 +9,14 @@
 
 A CLI security inspection tool for PHP APIs. Performs static source-code analysis using [nikic/php-parser](https://github.com/nikic/PHP-Parser) to identify authorization misconfigurations and security risks in Laravel, Symfony, and Slim applications.
 
+### Terminal Output
+
+![Terminal Output](assets/images/php1.png)
+
+### Findings Report
+
+![Findings Report](assets/images/php2.png)
+
 ## Features
 
 - Static analysis of PHP projects (no runtime required)

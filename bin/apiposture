@@ -26,7 +26,7 @@ if (!$autoloaderFound) {
 use ApiPosture\Command\ScanCommand;
 use Symfony\Component\Console\Application;
 
-$application = new Application('ApiPosture', '0.1.0');
+$application = new Application('ApiPosture', '1.0.4');
 $application->add(new ScanCommand());
 $application->setDefaultCommand('scan');
 $application->run();

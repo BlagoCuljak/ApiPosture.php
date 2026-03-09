@@ -26,6 +26,17 @@ if (!$autoloaderFound) {
 use ApiPosture\Command\ScanCommand;
 use Symfony\Component\Console\Application;
 
+// Normalize argv before Symfony Console parses it.
+// setDefaultCommand('scan', true) uses single-command mode so 'scan' is not
+// a recognized token — strip it so "apiposture scan <path>" still works.
+if (isset($_SERVER['argv'][1]) && $_SERVER['argv'][1] === 'scan') {
+    array_splice($_SERVER['argv'], 1, 1);
+}
+// "-version" is a common mistake; Symfony would parse it as short flags.
+if (isset($_SERVER['argv'][1]) && $_SERVER['argv'][1] === '-version') {
+    $_SERVER['argv'][1] = '--version';
+}
+
 $application = new Application('ApiPosture', '1.0.7');
 $application->add(new ScanCommand());
 $application->setDefaultCommand('scan', true);

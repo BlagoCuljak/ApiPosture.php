@@ -25,6 +25,17 @@ final class PlainPhpEndpointDiscoverer implements EndpointDiscovererInterface
 
     public function supports(array $ast, string $filePath): bool
     {
+        // Skip test files — they use HTTP superglobals in mock/assertion contexts,
+        // not as real endpoint handlers.
+        $base = basename($filePath);
+        if (str_ends_with($base, 'Test.php') || str_ends_with($base, 'TestCase.php')) {
+            return false;
+        }
+        $normalised = str_replace('\\', '/', $filePath);
+        if (str_contains($normalised, '/tests/') || str_contains($normalised, '/test/')) {
+            return false;
+        }
+
         $finder = new NodeFinder();
 
         // Skip files that contain Laravel Route:: static calls

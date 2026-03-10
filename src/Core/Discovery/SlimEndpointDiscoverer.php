@@ -84,9 +84,12 @@ final class SlimEndpointDiscoverer implements EndpointDiscovererInterface
             return false;
         }
 
-        // First arg should be a string (the path)
+        // First arg must be a string path starting with '/' — this avoids matching
+        // non-routing calls like $form->get('email'), $container->get('doctrine'),
+        // $session->get('token'), etc. which share the same method name signature.
         $firstArg = $node->getArgs()[0]->value;
-        return $firstArg instanceof Node\Scalar\String_;
+        return $firstArg instanceof Node\Scalar\String_
+            && str_starts_with($firstArg->value, '/');
     }
 
     private function parseRouteCall(Expr\MethodCall $call, string $filePath, array $groups): ?Endpoint

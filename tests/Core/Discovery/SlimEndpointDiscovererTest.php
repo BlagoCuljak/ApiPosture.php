@@ -99,4 +99,28 @@ final class SlimEndpointDiscovererTest extends TestCase
         $ast = $this->parser->parse($code);
         $this->assertTrue($this->discoverer->supports($ast, 'routes.php'));
     }
+
+    public function testDoesNotMatchNonRoutingGetCalls(): void
+    {
+        // $form->get('email') and $container->get('doctrine') must not be discovered as routes
+        $code = '<?php
+            $email = $form->get("email")->getData();
+            $doctrine = $container->get("doctrine");
+            $token = $session->get("ResetPasswordToken");
+        ';
+        $ast = $this->parser->parse($code);
+        $this->assertFalse($this->discoverer->supports($ast, 'Controller.php'));
+    }
+
+    public function testDoesNotDiscoverNonPathStringArgs(): void
+    {
+        // Only strings starting with '/' are valid Slim route paths
+        $code = '<?php
+            $value = $request->get("jti");
+            $value2 = $obj->get("sub");
+        ';
+        $ast = $this->parser->parse($code);
+        $endpoints = $this->discoverer->discover($ast, 'Validator.php');
+        $this->assertCount(0, $endpoints);
+    }
 }

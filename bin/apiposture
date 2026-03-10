@@ -37,7 +37,7 @@ if (isset($_SERVER['argv'][1]) && $_SERVER['argv'][1] === '-version') {
     $_SERVER['argv'][1] = '--version';
 }
 
-$application = new Application('ApiPosture', '1.0.7');
+$application = new Application('ApiPosture', '1.0.9');
 $application->add(new ScanCommand());
 $application->setDefaultCommand('scan', true);
 $application->run();

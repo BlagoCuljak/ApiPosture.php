@@ -40,8 +40,12 @@ final class AP007_SensitiveRouteKeywords implements SecurityRuleInterface
         $routeLower = strtolower($endpoint->route);
         $foundKeywords = [];
 
+        // Split route into word-level tokens to avoid substring false positives
+        // e.g. 'manage' must NOT match 'object-manager', 'panel' must NOT match 'expand'
+        $tokens = preg_split('/[\/\-_\.]+/', $routeLower, -1, PREG_SPLIT_NO_EMPTY) ?: [];
+
         foreach (self::SENSITIVE_KEYWORDS as $keyword) {
-            if (str_contains($routeLower, $keyword)) {
+            if (in_array($keyword, $tokens, true)) {
                 $foundKeywords[] = $keyword;
             }
         }

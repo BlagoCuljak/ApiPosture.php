@@ -7,6 +7,7 @@ namespace ApiPosture\Rules;
 use ApiPosture\Core\Model\Endpoint;
 use ApiPosture\Core\Model\Enums\Severity;
 use ApiPosture\Core\Model\Finding;
+use ApiPosture\Rules\KnownPublicRoutes;
 
 /**
  * AP008: Unprotected endpoint (no auth middleware at all).
@@ -45,6 +46,11 @@ final class AP008_UnprotectedEndpoint implements SecurityRuleInterface
 
         // Roles or policies present means some form of auth exists
         if (!empty($endpoint->authorization->roles) || !empty($endpoint->authorization->policies)) {
+            return [];
+        }
+
+        // Auth-flow and infrastructure endpoints have no auth by design
+        if (KnownPublicRoutes::isKnownPublicEndpoint($endpoint->route)) {
             return [];
         }
 

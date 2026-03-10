@@ -8,6 +8,7 @@ use ApiPosture\Core\Model\Endpoint;
 use ApiPosture\Core\Model\Enums\SecurityClassification;
 use ApiPosture\Core\Model\Enums\Severity;
 use ApiPosture\Core\Model\Finding;
+use ApiPosture\Rules\KnownPublicRoutes;
 
 /**
  * AP001: Public endpoint without explicit anonymous/guest intent.
@@ -40,6 +41,11 @@ final class AP001_PublicWithoutExplicitIntent implements SecurityRuleInterface
 
         // If there's auth, not public
         if ($endpoint->authorization->hasAuth) {
+            return [];
+        }
+
+        // Auth-flow and infrastructure endpoints are public by convention
+        if (KnownPublicRoutes::isKnownPublicEndpoint($endpoint->route)) {
             return [];
         }
 

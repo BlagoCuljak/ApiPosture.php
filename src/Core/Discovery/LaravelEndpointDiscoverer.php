@@ -416,6 +416,14 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         }
 
         $parentName = $class->extends->toString();
+
+        // Symfony controllers extend AbstractController — let SymfonyEndpointDiscoverer
+        // handle them. Matching them here produces duplicate non-prefixed routes.
+        if ($parentName === 'AbstractController'
+            || str_ends_with($parentName, '\\AbstractController')) {
+            return false;
+        }
+
         return $parentName === 'Controller'
             || str_ends_with($parentName, '\\Controller')
             || str_contains($parentName, 'Controller');

@@ -7,6 +7,7 @@ namespace ApiPosture\Rules;
 use ApiPosture\Core\Model\Endpoint;
 use ApiPosture\Core\Model\Enums\Severity;
 use ApiPosture\Core\Model\Finding;
+use ApiPosture\Rules\KnownPublicRoutes;
 
 /**
  * AP004: Write endpoints with zero authentication.
@@ -39,6 +40,11 @@ final class AP004_MissingAuthOnWrites implements SecurityRuleInterface
 
         // If there's any middleware at all that might provide auth
         if (!empty($endpoint->authorization->middleware)) {
+            return [];
+        }
+
+        // Auth-flow endpoints (login, register, token, …) require public write access by design
+        if (KnownPublicRoutes::isKnownPublicEndpoint($endpoint->route)) {
             return [];
         }
 

@@ -35,7 +35,9 @@ final class SlimEndpointDiscoverer implements EndpointDiscovererInterface
         $groupCalls = $finder->find($ast, function (Node $node) {
             return $node instanceof Expr\MethodCall
                 && $node->name instanceof Node\Identifier
-                && $node->name->toString() === 'group';
+                && $node->name->toString() === 'group'
+                && count($node->getArgs()) >= 2
+                && $this->isSlimRoutePath($node->getArgs()[0]->value);
         });
 
         return count($groupCalls) > 0;
@@ -79,17 +81,31 @@ final class SlimEndpointDiscoverer implements EndpointDiscovererInterface
             return false;
         }
 
-        // Must have at least a path argument
-        if (count($node->getArgs()) < 1) {
+        $args = $node->getArgs();
+
+        // map() signature: map(array $methods, string $path, callable $handler)
+        if ($methodName === 'map') {
+            return count($args) >= 3
+                && $args[0]->value instanceof Expr\Array_
+                && $this->isSlimRoutePath($args[1]->value);
+        }
+
+        // All other methods: get/post/put/delete/patch/any
+        // Slim routes always have at least (path, handler) — 2 args minimum.
+        // Single-arg calls like $cache->get('key') or $session->get('token') are never routes.
+        return count($args) >= 2
+            && $this->isSlimRoutePath($args[0]->value);
+    }
+
+    private function isSlimRoutePath(Node $node): bool
+    {
+        if (!$node instanceof Node\Scalar\String_) {
             return false;
         }
 
-        // First arg must be a string path starting with '/' — this avoids matching
-        // non-routing calls like $form->get('email'), $container->get('doctrine'),
-        // $session->get('token'), etc. which share the same method name signature.
-        $firstArg = $node->getArgs()[0]->value;
-        return $firstArg instanceof Node\Scalar\String_
-            && str_starts_with($firstArg->value, '/');
+        // Slim route patterns are always either empty (used inside groups)
+        // or start with '/'. Session keys, cache keys, config keys never match.
+        return $node->value === '' || str_starts_with($node->value, '/');
     }
 
     private function parseRouteCall(Expr\MethodCall $call, string $filePath, array $groups): ?Endpoint
@@ -102,7 +118,11 @@ final class SlimEndpointDiscoverer implements EndpointDiscovererInterface
         }
 
         $path = null;
-        if ($args[0]->value instanceof Node\Scalar\String_) {
+        if ($methodName === 'map') {
+            if (isset($args[1]) && $args[1]->value instanceof Node\Scalar\String_) {
+                $path = $args[1]->value->value;
+            }
+        } elseif ($args[0]->value instanceof Node\Scalar\String_) {
             $path = $args[0]->value->value;
         }
 

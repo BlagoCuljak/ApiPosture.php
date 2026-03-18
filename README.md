@@ -5,7 +5,7 @@
 [![Packagist Downloads](https://img.shields.io/packagist/dt/apiposture/apiposture?logo=packagist&label=Downloads)](https://packagist.org/packages/apiposture/apiposture)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![PHP](https://img.shields.io/badge/PHP-8.1%20|%208.2%20|%208.3%20|%208.4-777BB4?logo=php)](https://www.php.net/)
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-support-FFDD00?logo=buy-me-a-coffee&logoColor=black)](https://checkout.revolut.com/pay/525834c6-21cd-4d72-bb99-2dc27d3a0a6d)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-support-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/blagoculjak)
 
 A CLI security inspection tool for PHP APIs. Performs static source-code analysis using [nikic/php-parser](https://github.com/nikic/PHP-Parser) to identify authorization misconfigurations and security risks in Laravel, Symfony, and Slim applications.
 

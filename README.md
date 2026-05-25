@@ -22,7 +22,7 @@ A CLI security inspection tool for PHP APIs. Performs static source-code analysi
 - Static analysis of PHP projects (no runtime required)
 - Discovers endpoints from Laravel routes, Symfony attributes, and Slim route definitions
 - Detects 8 common security issues with authorization
-- Multiple output formats: Terminal, JSON, Markdown
+- Multiple output formats: Terminal, JSON, Markdown, HTML
 - Sorting, filtering, and grouping of results
 - Configuration file support with suppressions
 - Accessibility options (no-color, no-icons)
@@ -79,6 +79,9 @@ vendor/bin/apiposture scan . --output json
 
 # Output as Markdown report
 vendor/bin/apiposture scan . --output markdown --output-file report.md
+
+# Output as HTML report
+vendor/bin/apiposture scan . --output html --output-file report.html
 
 # Filter by severity
 vendor/bin/apiposture scan . --severity medium
@@ -308,6 +311,7 @@ jobs:
 - `--fail-on <severity>`: Exit with code 1 if findings of specified severity or higher are found
 - `--output json`: Generate machine-readable JSON output for further processing
 - `--output markdown`: Generate human-readable Markdown reports
+- `--output html`: Generate self-contained HTML reports
 - `--severity <level>`: Set minimum severity level to report
 - `--config .apiposture.json`: Use configuration file for suppressions and custom rules
 

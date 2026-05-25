@@ -12,6 +12,7 @@ use ApiPosture\Core\Model\Enums\SecurityClassification;
 use ApiPosture\Core\Model\Enums\Severity;
 use ApiPosture\Core\Model\Enums\SortDirection;
 use ApiPosture\Core\Model\Enums\SortField;
+use ApiPosture\Output\HtmlFormatter;
 use ApiPosture\Output\JsonFormatter;
 use ApiPosture\Output\MarkdownFormatter;
 use ApiPosture\Output\TerminalFormatter;
@@ -31,7 +32,7 @@ final class ScanCommand extends Command
             ->setName('scan')
             ->setDescription('Scan a PHP project for API security posture issues')
             ->addArgument('path', InputArgument::REQUIRED, 'Path to the project to scan')
-            ->addOption('output', 'o', InputOption::VALUE_REQUIRED, 'Output format: terminal, json, markdown', 'terminal')
+            ->addOption('output', 'o', InputOption::VALUE_REQUIRED, 'Output format: terminal, json, markdown, html', 'terminal')
             ->addOption('output-file', null, InputOption::VALUE_REQUIRED, 'Write output to a file')
             ->addOption('config', 'c', InputOption::VALUE_REQUIRED, 'Path to config file')
             ->addOption('severity', null, InputOption::VALUE_REQUIRED, 'Minimum severity to display: info, low, medium, high, critical')
@@ -137,6 +138,7 @@ final class ScanCommand extends Command
         $formatted = match ($outputFormat) {
             'json' => (new JsonFormatter())->format($filteredResult, $formatOptions),
             'markdown' => (new MarkdownFormatter())->format($filteredResult, $formatOptions),
+            'html' => (new HtmlFormatter())->format($filteredResult, $formatOptions),
             default => null,
         };
 

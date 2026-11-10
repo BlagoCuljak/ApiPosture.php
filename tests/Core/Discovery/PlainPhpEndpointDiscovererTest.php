@@ -186,4 +186,38 @@ final class PlainPhpEndpointDiscovererTest extends TestCase
 
         $this->assertFalse($endpoints[0]->authorization->hasAuth);
     }
+
+
+    public function testDoesNotSupportBuiltInServerRouterShim(): void
+    {
+        $code = '<?php
+            $uri = urldecode(parse_url($_SERVER["REQUEST_URI"], PHP_URL_PATH));
+            if ($uri !== "/" && file_exists(__DIR__."/public".$uri)) {
+                return false;
+            }
+            require_once __DIR__."/public/index.php";
+        ';
+        $ast = $this->parser->parse($code);
+        $this->assertFalse($this->discoverer->supports($ast, 'server.php'));
+    }
+
+    public function testSupportsServerOnlyFileThatHandlesRequestItself(): void
+    {
+        $code = '<?php
+            require __DIR__ . "/config.php";
+            if ($_SERVER["REQUEST_METHOD"] === "DELETE") { delete_all(); }
+        ';
+        $ast = $this->parser->parse($code);
+        $this->assertTrue($this->discoverer->supports($ast, 'purge.php'));
+    }
+
+    public function testSupportsFileThatReadsInputBeforeIncludingIndex(): void
+    {
+        $code = '<?php
+            $id = $_GET["id"];
+            require __DIR__ . "/index.php";
+        ';
+        $ast = $this->parser->parse($code);
+        $this->assertTrue($this->discoverer->supports($ast, 'proxy.php'));
+    }
 }

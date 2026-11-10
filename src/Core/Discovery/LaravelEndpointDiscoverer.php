@@ -18,12 +18,25 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
 {
     private const ROUTE_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'any', 'match'];
 
+    private const RESOURCE_METHODS = ['resource', 'apiresource', 'resources', 'apiresources'];
+
     private const AUTH_MIDDLEWARE = [
         'auth', 'auth:api', 'auth:sanctum', 'auth:web',
         'auth.basic', 'verified',
     ];
 
     private const ANONYMOUS_MIDDLEWARE = ['guest'];
+
+    /**
+     * Framework middleware referenced by class (Authenticate::class) mapped to their alias.
+     */
+    private const MIDDLEWARE_CLASS_ALIASES = [
+        'authenticate' => 'auth',
+        'authenticatewithbasicauth' => 'auth.basic',
+        'ensureemailisverified' => 'verified',
+        'redirectifauthenticated' => 'guest',
+        'ensurefrontendrequestsarestateful' => 'auth:sanctum',
+    ];
 
     public function supports(array $ast, string $filePath): bool
     {
@@ -65,46 +78,82 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
 
     private function discoverRouteDefinitions(array $ast, string $filePath, NodeFinder $finder): array
     {
-        return $this->discoverRouteDefinitionsRecursive($ast, $filePath, [], []);
+        return $this->discoverRouteDefinitionsRecursive($ast, $filePath, [
+            'middleware' => [],
+            'without' => [],
+            'prefixes' => [],
+            'controller' => null,
+        ]);
     }
 
     /**
-     * Recursively walk statements to discover routes, tracking group middleware/prefix context.
+     * Recursively walk statements to discover routes, tracking group context
+     * (middleware, excluded middleware, prefixes, group controller).
      *
      * @param Node[] $nodes
-     * @param string[] $contextMiddleware
-     * @param string[] $contextPrefixes
+     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string} $context
      * @return Endpoint[]
      */
-    private function discoverRouteDefinitionsRecursive(array $nodes, string $filePath, array $contextMiddleware, array $contextPrefixes): array
+    private function discoverRouteDefinitionsRecursive(array $nodes, string $filePath, array $context): array
     {
         $endpoints = [];
 
         foreach ($nodes as $node) {
-            // Extract the expression from expression statements
-            $expr = $node instanceof Stmt\Expression ? $node->expr : $node;
+            // Routes are often registered inside namespaces, conditionals, loops or try blocks.
+            $nested = $this->nestedStatementLists($node);
+            if ($nested !== null) {
+                foreach ($nested as $stmts) {
+                    $endpoints = array_merge($endpoints, $this->discoverRouteDefinitionsRecursive($stmts, $filePath, $context));
+                }
+                continue;
+            }
 
-            // Check if this is a group call: Route::middleware([...])->group(closure) or Route::group([...], closure)
+            $expr = match (true) {
+                $node instanceof Stmt\Expression => $node->expr,
+                $node instanceof Stmt\Return_ => $node->expr,
+                default => $node,
+            };
+            if (!$expr instanceof Expr) {
+                continue;
+            }
+
+            // Group call: Route::group([...], fn), Route::middleware(...)->prefix(...)->group(fn), ...
             $groupInfo = $this->extractGroupInfo($expr);
             if ($groupInfo !== null) {
-                $mergedMiddleware = array_merge($contextMiddleware, $groupInfo['middleware']);
-                $mergedPrefixes = $contextPrefixes;
-                if (!empty($groupInfo['prefix'])) {
-                    $mergedPrefixes[] = $groupInfo['prefix'];
+                $childContext = $context;
+                $childContext['middleware'] = array_merge($context['middleware'], $groupInfo['middleware']);
+                $childContext['without'] = array_merge($context['without'], $groupInfo['without']);
+                if ($groupInfo['prefix'] !== '') {
+                    $childContext['prefixes'][] = $groupInfo['prefix'];
+                }
+                if ($groupInfo['controller'] !== null) {
+                    $childContext['controller'] = $groupInfo['controller'];
                 }
                 $endpoints = array_merge(
                     $endpoints,
-                    $this->discoverRouteDefinitionsRecursive($groupInfo['statements'], $filePath, $mergedMiddleware, $mergedPrefixes)
+                    $this->discoverRouteDefinitionsRecursive($groupInfo['statements'], $filePath, $childContext)
                 );
                 continue;
             }
 
-            // Check if this is a route method call: Route::get(), Route::post(), etc.
-            if ($this->isRouteMethodCall($expr)) {
-                $endpoint = $this->parseRouteCallWithContext($expr, $filePath, $contextMiddleware, $contextPrefixes);
-                if ($endpoint !== null) {
-                    $endpoints[] = $endpoint;
-                }
+            // Route definition, possibly followed by a trailing chain: Route::post(...)->name(...)->middleware(...)
+            $route = $this->unwrapRouteCall($expr);
+            if ($route === null) {
+                continue;
+            }
+
+            $verb = strtolower($route['call']->name->toString());
+            if (in_array($verb, self::RESOURCE_METHODS, true)) {
+                $endpoints = array_merge(
+                    $endpoints,
+                    $this->parseResourceCall($route['call'], $route['trailing'], $filePath, $context)
+                );
+                continue;
+            }
+
+            $endpoint = $this->parseRouteCallWithContext($route['call'], $route['trailing'], $filePath, $context);
+            if ($endpoint !== null) {
+                $endpoints[] = $endpoint;
             }
         }
 
@@ -112,97 +161,167 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
     }
 
     /**
-     * Extract group info (middleware, prefix, closure statements) from a group call.
+     * Statement lists nested inside a non-expression statement, or null for leaf statements.
+     * Function and class bodies are deliberately not entered.
      *
-     * @return array{middleware: string[], prefix: string, statements: Stmt[]}|null
+     * @return array<Node[]>|null
+     */
+    private function nestedStatementLists(Node $node): ?array
+    {
+        return match (true) {
+            $node instanceof Stmt\Namespace_,
+            $node instanceof Stmt\Block,
+            $node instanceof Stmt\Declare_,
+            $node instanceof Stmt\Foreach_,
+            $node instanceof Stmt\For_,
+            $node instanceof Stmt\While_,
+            $node instanceof Stmt\Do_ => [$node->stmts ?? []],
+            $node instanceof Stmt\If_ => array_merge(
+                [$node->stmts],
+                array_map(fn(Stmt\ElseIf_ $e) => $e->stmts, $node->elseifs),
+                $node->else !== null ? [$node->else->stmts] : [],
+            ),
+            $node instanceof Stmt\TryCatch => array_merge(
+                [$node->stmts],
+                array_map(fn(Stmt\Catch_ $c) => $c->stmts, $node->catches),
+                $node->finally !== null ? [$node->finally->stmts] : [],
+            ),
+            $node instanceof Stmt\Switch_ => array_map(fn(Stmt\Case_ $c) => $c->stmts, $node->cases),
+            default => null,
+        };
+    }
+
+    /**
+     * Find the route-registering call inside an expression, peeling off any trailing chain.
+     *
+     * Route::get('/x', ...)->name('x')->middleware('auth') yields call = Route::get(...)
+     * and trailing = [->middleware('auth'), ->name('x')].
+     *
+     * @return array{call: Expr\StaticCall|Expr\MethodCall, trailing: Expr\MethodCall[]}|null
+     */
+    private function unwrapRouteCall(Expr $expr): ?array
+    {
+        $trailing = [];
+        $current = $expr;
+
+        while (true) {
+            if ($this->isRouteMethodCall($current)) {
+                /** @var Expr\StaticCall|Expr\MethodCall $current */
+                return ['call' => $current, 'trailing' => $trailing];
+            }
+            if (!$current instanceof Expr\MethodCall) {
+                return null;
+            }
+            $trailing[] = $current;
+            $current = $current->var;
+        }
+    }
+
+    /**
+     * Extract group info (middleware, prefix, controller, closure statements) from a group call.
+     *
+     * @return array{middleware: string[], without: string[], prefix: string, controller: ?string, statements: Node[]}|null
      */
     private function extractGroupInfo(Node $node): ?array
     {
-        if (!$node instanceof Expr\MethodCall) {
+        if (!$node instanceof Expr\MethodCall && !$node instanceof Expr\StaticCall) {
             return null;
         }
 
-        if (!$node->name instanceof Node\Identifier || $node->name->toString() !== 'group') {
+        if (!$node->name instanceof Node\Identifier || strtolower($node->name->toString()) !== 'group') {
+            return null;
+        }
+
+        // Static form must be called on the Route facade: Route::group([...], fn)
+        if ($node instanceof Expr\StaticCall && !$this->isRouteStaticCall($node)) {
             return null;
         }
 
         $middleware = [];
-        $prefix = '';
-        $closureStmts = [];
+        $without = [];
+        $prefixes = [];
+        $controller = null;
+        $closureStmts = null;
 
-        // Extract closure from group args
         foreach ($node->getArgs() as $arg) {
-            if ($arg->value instanceof Expr\Closure) {
-                $closureStmts = $arg->value->stmts ?? [];
-            } elseif ($arg->value instanceof Expr\ArrowFunction) {
-                // Arrow functions don't have stmts
-                continue;
-            } elseif ($arg->value instanceof Expr\Array_) {
-                // Route::group(['prefix' => '...', 'middleware' => ...], closure)
-                foreach ($arg->value->items as $item) {
-                    if ($item?->key instanceof Node\Scalar\String_) {
-                        if ($item->key->value === 'prefix') {
-                            $p = $this->resolveStringValue($item->value);
-                            if ($p !== null) {
-                                $prefix = $p;
-                            }
-                        } elseif ($item->key->value === 'middleware') {
-                            if ($item->value instanceof Node\Scalar\String_) {
-                                $middleware[] = $item->value->value;
-                            } elseif ($item->value instanceof Expr\Array_) {
-                                foreach ($item->value->items as $mwItem) {
-                                    if ($mwItem?->value instanceof Node\Scalar\String_) {
-                                        $middleware[] = $mwItem->value->value;
-                                    }
-                                }
-                            }
+            $value = $arg->value;
+            if ($value instanceof Expr\Closure) {
+                $closureStmts = $value->stmts;
+            } elseif ($value instanceof Expr\ArrowFunction) {
+                $closureStmts = [new Stmt\Expression($value->expr)];
+            } elseif ($value instanceof Expr\Array_) {
+                // Route::group(['prefix' => '...', 'middleware' => ..., 'controller' => ...], fn)
+                foreach ($value->items as $item) {
+                    $key = $item?->key instanceof Node\Scalar\String_ ? $item->key->value : null;
+                    if ($key === 'prefix') {
+                        $p = $this->resolveStringValue($item->value);
+                        if ($p !== null) {
+                            $prefixes[] = $p;
                         }
+                    } elseif ($key === 'middleware') {
+                        $middleware = array_merge($middleware, $this->resolveMiddlewareValues($item->value));
+                    } elseif ($key === 'excluded_middleware' || $key === 'withoutMiddleware') {
+                        $without = array_merge($without, $this->resolveMiddlewareValues($item->value));
+                    } elseif ($key === 'controller' && $item->value instanceof Expr\ClassConstFetch) {
+                        $controller = $this->resolveClassName($item->value);
                     }
                 }
             }
         }
 
-        // Walk the chain (var) to find middleware/prefix calls:
-        // Route::middleware(['auth'])->prefix('/api')->group(...)
-        $current = $node->var;
-        while ($current instanceof Expr\MethodCall || $current instanceof Expr\StaticCall) {
-            $callName = null;
-            if ($current instanceof Expr\MethodCall && $current->name instanceof Node\Identifier) {
-                $callName = $current->name->toString();
-            } elseif ($current instanceof Expr\StaticCall && $current->name instanceof Node\Identifier) {
-                $callName = $current->name->toString();
-            }
+        // A group whose body is not a closure (e.g. ->group(base_path('routes/api.php'))) is not walkable here.
+        if ($closureStmts === null) {
+            return null;
+        }
 
-            if ($callName === 'middleware') {
-                $middleware = array_merge($middleware, $this->extractChainMiddlewareArgs($current));
-            } elseif ($callName === 'prefix' && count($current->getArgs()) > 0) {
-                $p = $this->resolveStringValue($current->getArgs()[0]->value);
-                if ($p !== null) {
-                    $prefix = $p;
+        // Walk the registrar chain: Route::middleware([...])->prefix('/api')->controller(X::class)->group(...)
+        $current = $node instanceof Expr\MethodCall ? $node->var : null;
+        while ($current instanceof Expr\MethodCall || $current instanceof Expr\StaticCall) {
+            if ($current->name instanceof Node\Identifier) {
+                $callName = strtolower($current->name->toString());
+                $args = $current->getArgs();
+                if ($callName === 'middleware') {
+                    $middleware = array_merge($middleware, $this->extractChainMiddlewareArgs($current));
+                } elseif ($callName === 'withoutmiddleware') {
+                    $without = array_merge($without, $this->extractChainMiddlewareArgs($current));
+                } elseif ($callName === 'can' && count($args) > 0) {
+                    $ability = $this->resolveStringValue($args[0]->value);
+                    $middleware[] = 'can:' . ($ability ?? '*');
+                } elseif ($callName === 'prefix' && count($args) > 0) {
+                    $p = $this->resolveStringValue($args[0]->value);
+                    if ($p !== null) {
+                        // Chain is walked outermost-first, so earlier prefixes go in front.
+                        array_unshift($prefixes, $p);
+                    }
+                } elseif ($callName === 'controller' && count($args) > 0 && $args[0]->value instanceof Expr\ClassConstFetch) {
+                    $controller = $this->resolveClassName($args[0]->value);
                 }
             }
 
             $current = $current instanceof Expr\MethodCall ? $current->var : null;
-            if ($current === null) {
-                break;
-            }
         }
 
-        if (empty($closureStmts)) {
-            return null;
+        $prefix = '';
+        foreach ($prefixes as $p) {
+            $prefix = $this->joinPath($prefix, $p);
         }
 
         return [
             'middleware' => $middleware,
-            'prefix' => $prefix,
+            'without' => $without,
+            'prefix' => $prefix === '/' ? '' : $prefix,
+            'controller' => $controller,
             'statements' => $closureStmts,
         ];
     }
 
     /**
      * Parse a route call with accumulated context from parent groups.
+     *
+     * @param Expr\MethodCall[] $trailing
+     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string} $context
      */
-    private function parseRouteCallWithContext(Node $node, string $filePath, array $contextMiddleware, array $contextPrefixes): ?Endpoint
+    private function parseRouteCallWithContext(Node $node, array $trailing, string $filePath, array $context): ?Endpoint
     {
         if (!$node instanceof Expr\StaticCall && !$node instanceof Expr\MethodCall) {
             return null;
@@ -213,36 +332,39 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
             return null;
         }
 
+        // Route::match(['GET', 'POST'], '/path', $action) shifts path/action one position right.
+        $isMatch = $node->name instanceof Node\Identifier && strtolower($node->name->toString()) === 'match';
+        $pathIndex = $isMatch ? 1 : 0;
+
         $args = $node->getArgs();
-        if (count($args) < 1) {
+        if (count($args) <= $pathIndex) {
             return null;
         }
 
-        $path = $this->resolveStringValue($args[0]->value);
+        $path = $this->resolveStringValue($args[$pathIndex]->value);
         if ($path === null) {
             return null;
         }
 
-        // Build full path from context prefixes
-        $prefix = '';
-        foreach ($contextPrefixes as $p) {
-            $prefix = rtrim($prefix, '/') . '/' . ltrim($p, '/');
-        }
-        $fullPath = rtrim($prefix, '/') . '/' . ltrim($path, '/');
-        if ($fullPath === '') {
-            $fullPath = '/';
-        }
+        $fullPath = $this->buildFullPath($context['prefixes'], $path);
 
         // Resolve controller and action
         $controllerName = null;
         $actionName = null;
-        if (count($args) >= 2) {
-            [$controllerName, $actionName] = $this->resolveControllerAction($args[1]->value);
+        if (isset($args[$pathIndex + 1])) {
+            [$controllerName, $actionName] = $this->resolveControllerAction($args[$pathIndex + 1]->value, $context['controller']);
         }
 
-        // Merge chain middleware with context middleware
-        $chainMiddleware = $this->getChainMiddleware($node);
-        $allMiddleware = array_merge($contextMiddleware, $chainMiddleware);
+        // Middleware: group context + registrar chain before the verb + trailing chain after it.
+        $allMiddleware = array_merge(
+            $context['middleware'],
+            $this->getChainMiddleware($node),
+            $this->getTrailingMiddleware($trailing),
+        );
+        $allMiddleware = $this->removeMiddleware(
+            $allMiddleware,
+            array_merge($context['without'], $this->getTrailingWithoutMiddleware($trailing)),
+        );
 
         $authInfo = $this->resolveAuthFromMiddleware($allMiddleware);
 
@@ -255,6 +377,235 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
             controllerName: $controllerName,
             actionName: $actionName,
         );
+    }
+
+    /**
+     * Expand Route::resource / apiResource / resources / apiResources into their RESTful endpoints.
+     *
+     * @param Expr\MethodCall[] $trailing
+     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string} $context
+     * @return Endpoint[]
+     */
+    private function parseResourceCall(Expr\StaticCall|Expr\MethodCall $call, array $trailing, string $filePath, array $context): array
+    {
+        $verb = strtolower($call->name->toString());
+        $isApi = str_starts_with($verb, 'api');
+        $args = $call->getArgs();
+        if (count($args) < 1) {
+            return [];
+        }
+
+        // Collect [name => controller] pairs.
+        $resources = [];
+        if ($verb === 'resources' || $verb === 'apiresources') {
+            if (!$args[0]->value instanceof Expr\Array_) {
+                return [];
+            }
+            foreach ($args[0]->value->items as $item) {
+                $name = $item?->key !== null ? $this->resolveStringValue($item->key) : null;
+                if ($name !== null) {
+                    $resources[$name] = $item->value instanceof Expr\ClassConstFetch ? $this->resolveClassName($item->value) : null;
+                }
+            }
+        } else {
+            $name = $this->resolveStringValue($args[0]->value);
+            if ($name === null) {
+                return [];
+            }
+            $resources[$name] = isset($args[1]) && $args[1]->value instanceof Expr\ClassConstFetch
+                ? $this->resolveClassName($args[1]->value)
+                : null;
+        }
+
+        $actions = $isApi
+            ? ['index', 'store', 'show', 'update', 'destroy']
+            : ['index', 'create', 'store', 'show', 'edit', 'update', 'destroy'];
+
+        // only/except from an options array (3rd arg) or a trailing ->only()/->except() chain.
+        $only = null;
+        $except = [];
+        $optionsArg = $args[2]->value ?? null;
+        if ($optionsArg instanceof Expr\Array_) {
+            foreach ($optionsArg->items as $item) {
+                $key = $item?->key instanceof Node\Scalar\String_ ? $item->key->value : null;
+                if ($key === 'only') {
+                    $only = $this->resolveStringList($item->value);
+                } elseif ($key === 'except') {
+                    $except = array_merge($except, $this->resolveStringList($item->value));
+                }
+            }
+        }
+        foreach ($trailing as $t) {
+            $tName = $t->name instanceof Node\Identifier ? strtolower($t->name->toString()) : '';
+            $tArgs = $t->getArgs();
+            if ($tName === 'only' && count($tArgs) > 0) {
+                $only = $this->resolveStringList($tArgs[0]->value);
+            } elseif ($tName === 'except' && count($tArgs) > 0) {
+                $except = array_merge($except, $this->resolveStringList($tArgs[0]->value));
+            }
+        }
+        if ($only !== null) {
+            $actions = array_values(array_intersect($actions, $only));
+        }
+        $actions = array_values(array_diff($actions, $except));
+
+        $allMiddleware = $this->removeMiddleware(
+            array_merge($context['middleware'], $this->getChainMiddleware($call), $this->getTrailingMiddleware($trailing)),
+            array_merge($context['without'], $this->getTrailingWithoutMiddleware($trailing)),
+        );
+        $authInfo = $this->resolveAuthFromMiddleware($allMiddleware);
+
+        $endpoints = [];
+        foreach ($resources as $name => $controller) {
+            [$base, $param] = $this->resourceBasePath($name);
+            $member = $base . '/{' . $param . '}';
+            $map = [
+                'index' => [$base, [HttpMethod::GET]],
+                'create' => [$base . '/create', [HttpMethod::GET]],
+                'store' => [$base, [HttpMethod::POST]],
+                'show' => [$member, [HttpMethod::GET]],
+                'edit' => [$member . '/edit', [HttpMethod::GET]],
+                'update' => [$member, [HttpMethod::PUT, HttpMethod::PATCH]],
+                'destroy' => [$member, [HttpMethod::DELETE]],
+            ];
+            foreach ($actions as $action) {
+                [$path, $methods] = $map[$action];
+                $endpoints[] = new Endpoint(
+                    route: $this->buildFullPath($context['prefixes'], $path),
+                    methods: $methods,
+                    type: EndpointType::Route,
+                    location: new SourceLocation($filePath, $call->getStartLine()),
+                    authorization: $authInfo,
+                    controllerName: $controller ?? $context['controller'],
+                    actionName: $action,
+                );
+            }
+        }
+
+        return $endpoints;
+    }
+
+    /**
+     * 'photos' => ['/photos', 'photo']; 'photos.comments' => ['/photos/{photo}/comments', 'comment'].
+     *
+     * @return array{string, string}
+     */
+    private function resourceBasePath(string $name): array
+    {
+        $segments = array_values(array_filter(explode('.', trim($name, '/')), fn($s) => $s !== ''));
+        $path = '';
+        $param = 'id';
+        foreach ($segments as $i => $segment) {
+            $param = str_replace('-', '_', $this->singularize(basename($segment)));
+            $path .= '/' . $segment;
+            if ($i < count($segments) - 1) {
+                $path .= '/{' . $param . '}';
+            }
+        }
+        return [$path === '' ? '/' : $path, $param];
+    }
+
+    private function singularize(string $word): string
+    {
+        $lower = strtolower($word);
+        if (str_ends_with($lower, 'ies') && strlen($word) > 3) {
+            return substr($word, 0, -3) . 'y';
+        }
+        foreach (['sses', 'shes', 'ches', 'xes', 'zes'] as $suffix) {
+            if (str_ends_with($lower, $suffix)) {
+                return substr($word, 0, -2);
+            }
+        }
+        if (str_ends_with($lower, 's') && !str_ends_with($lower, 'ss') && strlen($word) > 1) {
+            return substr($word, 0, -1);
+        }
+        return $word;
+    }
+
+    /**
+     * @param string[] $prefixes
+     */
+    private function buildFullPath(array $prefixes, string $path): string
+    {
+        $prefix = '';
+        foreach ($prefixes as $p) {
+            $prefix = $this->joinPath($prefix, $p);
+        }
+        $fullPath = $this->joinPath($prefix, $path);
+        return $fullPath === '' ? '/' : $fullPath;
+    }
+
+    private function joinPath(string $left, string $right): string
+    {
+        $left = rtrim($left, '/');
+        $right = trim($right, '/');
+        if ($right === '') {
+            return $left === '' ? '/' : $left;
+        }
+        return $left . '/' . $right;
+    }
+
+    /**
+     * @param Expr\MethodCall[] $trailing
+     * @return string[]
+     */
+    private function getTrailingMiddleware(array $trailing): array
+    {
+        $middleware = [];
+        foreach ($trailing as $call) {
+            if (!$call->name instanceof Node\Identifier) {
+                continue;
+            }
+            $name = strtolower($call->name->toString());
+            if ($name === 'middleware') {
+                $middleware = array_merge($middleware, $this->extractChainMiddlewareArgs($call));
+            } elseif ($name === 'can' && count($call->getArgs()) > 0) {
+                // Route::put(...)->can('update', 'post') is sugar for ->middleware('can:update,post')
+                $ability = $this->resolveStringValue($call->getArgs()[0]->value);
+                $middleware[] = 'can:' . ($ability ?? '*');
+            }
+        }
+        return $middleware;
+    }
+
+    /**
+     * @param Expr\MethodCall[] $trailing
+     * @return string[]
+     */
+    private function getTrailingWithoutMiddleware(array $trailing): array
+    {
+        $without = [];
+        foreach ($trailing as $call) {
+            if ($call->name instanceof Node\Identifier && strtolower($call->name->toString()) === 'withoutmiddleware') {
+                $without = array_merge($without, $this->extractChainMiddlewareArgs($call));
+            }
+        }
+        return $without;
+    }
+
+    /**
+     * Remove excluded middleware. Excluding 'auth' also drops guarded variants such as 'auth:api'.
+     *
+     * @param string[] $middleware
+     * @param string[] $without
+     * @return string[]
+     */
+    private function removeMiddleware(array $middleware, array $without): array
+    {
+        if ($without === []) {
+            return array_values(array_unique($middleware));
+        }
+        $without = array_map('strtolower', $without);
+        $kept = array_filter($middleware, function (string $mw) use ($without) {
+            $lower = strtolower($mw);
+            foreach ($without as $w) {
+                if ($lower === $w || str_starts_with($lower, $w . ':')) {
+                    return false;
+                }
+            }
+            return true;
+        });
+        return array_values(array_unique($kept));
     }
 
     private function discoverControllerEndpoints(array $ast, string $filePath, NodeFinder $finder): array
@@ -324,21 +675,26 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
                 return false;
             }
             if ($node->name instanceof Node\Identifier) {
-                return in_array(strtolower($node->name->toString()), self::ROUTE_METHODS, true);
+                return $this->isRouteVerb($node->name->toString());
             }
         }
 
         // Chained method calls like Route::middleware('auth')->get()
         if ($node instanceof Expr\MethodCall) {
             if ($node->name instanceof Node\Identifier) {
-                $methodName = strtolower($node->name->toString());
-                if (in_array($methodName, self::ROUTE_METHODS, true)) {
+                if ($this->isRouteVerb($node->name->toString())) {
                     return $this->isRouteChain($node->var);
                 }
             }
         }
 
         return false;
+    }
+
+    private function isRouteVerb(string $name): bool
+    {
+        $lower = strtolower($name);
+        return in_array($lower, self::ROUTE_METHODS, true) || in_array($lower, self::RESOURCE_METHODS, true);
     }
 
     private function isRouteChain(Expr $expr): bool
@@ -617,17 +973,76 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
     {
         $middleware = [];
         foreach ($call->getArgs() as $arg) {
-            if ($arg->value instanceof Node\Scalar\String_) {
-                $middleware[] = $arg->value->value;
-            } elseif ($arg->value instanceof Expr\Array_) {
-                foreach ($arg->value->items as $item) {
-                    if ($item?->value instanceof Node\Scalar\String_) {
-                        $middleware[] = $item->value->value;
-                    }
-                }
-            }
+            $middleware = array_merge($middleware, $this->resolveMiddlewareValues($arg->value));
         }
         return $middleware;
+    }
+
+    /**
+     * Resolve a middleware expression to names. Handles literals, arrays, class references,
+     * concatenation ('auth:' . $guard => 'auth:*') and conditionals (both branches).
+     *
+     * @return string[]
+     */
+    private function resolveMiddlewareValues(Node $value): array
+    {
+        if ($value instanceof Node\Scalar\String_) {
+            return [$value->value];
+        }
+
+        if ($value instanceof Expr\Array_) {
+            $names = [];
+            foreach ($value->items as $item) {
+                if ($item !== null) {
+                    $names = array_merge($names, $this->resolveMiddlewareValues($item->value));
+                }
+            }
+            return $names;
+        }
+
+        if ($value instanceof Expr\ClassConstFetch && $value->class instanceof Node\Name
+            && $value->name instanceof Node\Identifier && strtolower($value->name->toString()) === 'class') {
+            $short = strtolower($value->class->getLast());
+            return [self::MIDDLEWARE_CLASS_ALIASES[$short] ?? $value->class->getLast()];
+        }
+
+        if ($value instanceof Expr\BinaryOp\Concat) {
+            $left = $this->resolveStringValue($value->left);
+            if ($left === null) {
+                return [];
+            }
+            return [$left . ($this->resolveStringValue($value->right) ?? '*')];
+        }
+
+        // $cond ? 'auth:api' : 'auth' and $x ?? 'auth' — every branch is a middleware the route may run.
+        if ($value instanceof Expr\Ternary) {
+            $then = $value->if !== null ? $this->resolveMiddlewareValues($value->if) : $this->resolveMiddlewareValues($value->cond);
+            return array_merge($then, $this->resolveMiddlewareValues($value->else));
+        }
+        if ($value instanceof Expr\BinaryOp\Coalesce) {
+            return array_merge($this->resolveMiddlewareValues($value->left), $this->resolveMiddlewareValues($value->right));
+        }
+
+        return [];
+    }
+
+    /**
+     * @return string[]
+     */
+    private function resolveStringList(Node $value): array
+    {
+        if ($value instanceof Expr\Array_) {
+            $list = [];
+            foreach ($value->items as $item) {
+                $s = $item !== null ? $this->resolveStringValue($item->value) : null;
+                if ($s !== null) {
+                    $list[] = $s;
+                }
+            }
+            return $list;
+        }
+        $s = $this->resolveStringValue($value);
+        return $s !== null ? [$s] : [];
     }
 
     /**
@@ -697,8 +1112,19 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
     /**
      * @return array{?string, ?string}
      */
-    private function resolveControllerAction(Expr $expr): array
+    private function resolveControllerAction(Expr $expr, ?string $groupController = null): array
     {
+        // Invokable controller: Route::put('/profile', ProfileSyncController::class)
+        if ($expr instanceof Expr\ClassConstFetch && $expr->name instanceof Node\Identifier
+            && strtolower($expr->name->toString()) === 'class') {
+            return [$this->resolveClassName($expr), '__invoke'];
+        }
+
+        // Route::controller(X::class)->group(fn () => Route::get('/x', 'method'))
+        if ($groupController !== null && $expr instanceof Node\Scalar\String_ && !str_contains($expr->value, '@')) {
+            return [$groupController, $expr->value];
+        }
+
         // [Controller::class, 'method']
         if ($expr instanceof Expr\Array_ && count($expr->items) >= 2) {
             $controller = null;
@@ -738,6 +1164,11 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
     {
         if ($node instanceof Node\Scalar\String_) {
             return $node->value;
+        }
+        if ($node instanceof Expr\BinaryOp\Concat) {
+            $left = $this->resolveStringValue($node->left);
+            $right = $this->resolveStringValue($node->right);
+            return $left !== null && $right !== null ? $left . $right : null;
         }
         return null;
     }

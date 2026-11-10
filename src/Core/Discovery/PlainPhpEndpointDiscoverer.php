@@ -54,7 +54,46 @@ final class PlainPhpEndpointDiscoverer implements EndpointDiscovererInterface
             return $this->isHttpSuperglobalAccess($node);
         });
 
-        return !empty($httpUsage);
+        if (empty($httpUsage)) {
+            return false;
+        }
+
+        return !$this->isFrontControllerShim($ast, $httpUsage);
+    }
+
+    /**
+     * Built-in web server router scripts (Laravel's server.php, router.php) only read
+     * $_SERVER to locate the request path and then hand over to the real front
+     * controller. They are not endpoints of their own.
+     *
+     * @param Node[] $ast
+     * @param Expr\Variable[] $httpUsage
+     */
+    private function isFrontControllerShim(array $ast, array $httpUsage): bool
+    {
+        foreach ($httpUsage as $var) {
+            if ($var->name !== '_SERVER') {
+                return false;
+            }
+        }
+
+        $finder = new NodeFinder();
+        $include = $finder->findFirst($ast, function (Node $node) {
+            if (!$node instanceof Expr\Include_) {
+                return false;
+            }
+            $strings = $node->expr instanceof Node\Scalar\String_
+                ? [$node->expr]
+                : (new NodeFinder())->findInstanceOf($node->expr, Node\Scalar\String_::class);
+            foreach ($strings as $string) {
+                if (str_ends_with(strtolower($string->value), 'index.php')) {
+                    return true;
+                }
+            }
+            return false;
+        });
+
+        return $include !== null;
     }
 
     public function discover(array $ast, string $filePath): array

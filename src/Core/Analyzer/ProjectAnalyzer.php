@@ -11,6 +11,7 @@ use ApiPosture\Core\Discovery\LaravelEndpointDiscoverer;
 use ApiPosture\Core\Discovery\PlainPhpEndpointDiscoverer;
 use ApiPosture\Core\Discovery\SlimEndpointDiscoverer;
 use ApiPosture\Core\Discovery\SymfonyEndpointDiscoverer;
+use ApiPosture\Core\Discovery\TestFileDetector;
 use ApiPosture\Core\Model\Endpoint;
 use ApiPosture\Core\Model\Enums\GroupField;
 use ApiPosture\Core\Model\Enums\HttpMethod;
@@ -71,6 +72,11 @@ final class ProjectAnalyzer
             try {
                 $ast = $this->parser->parse(file_get_contents($filePath));
                 if ($ast === null) {
+                    continue;
+                }
+
+                // Routes registered by test suites are fixtures, not application endpoints.
+                if (TestFileDetector::isTestFile($filePath, $ast)) {
                     continue;
                 }
 

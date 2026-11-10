@@ -37,6 +37,32 @@ final class ScanCommandTest extends TestCase
         $this->assertNotEmpty($decoded['endpoints'], 'Should find Laravel endpoints');
     }
 
+    public function testScanLaravelGroupedRoutesAndIgnoresTestHarness(): void
+    {
+        $this->commandTester->execute([
+            'path' => __DIR__ . '/../Fixtures/LaravelGroups',
+            '--output' => 'json',
+        ]);
+
+        $decoded = json_decode($this->commandTester->getDisplay(), true);
+        $this->assertNotNull($decoded);
+
+        $routes = [];
+        foreach ($decoded['endpoints'] as $endpoint) {
+            $routes[implode(',', $endpoint['methods']) . ' ' . $endpoint['route']] = $endpoint['authorization']['hasAuth'];
+        }
+        ksort($routes);
+
+        $this->assertSame([
+            'GET /health-check' => false,
+            'GET /professional/delete/{hardDelete}' => false,
+            'POST /login' => false,
+            'POST /reset-password' => false,
+            'POST /signup' => false,
+            'PUT /auth/profile' => true,
+        ], $routes);
+    }
+
     public function testScanSymfonyFixtures(): void
     {
         $this->commandTester->execute([

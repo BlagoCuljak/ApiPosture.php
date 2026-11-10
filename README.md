@@ -124,11 +124,20 @@ vendor/bin/apiposture scan . --config .apiposture.json
   Laravel 11 `bootstrap/app.php` `withRouting(api: ..., apiPrefix: ...)`
 - **Middleware aliases and groups** from `Http\Kernel` and `bootstrap/app.php` (`$middleware->alias()`, `->group()`, `->api(append: ...)`)
 - **Custom auth middleware detected by behaviour**: a middleware counts as authentication when its `handle()`
-  rejects with 401 / an unauthenticated exception, or with 403 after inspecting the user, a token or a shared
-  secret (`hash_equals`). Validation (422) and business rules are not mistaken for auth.
+  rejects with 401/403 after inspecting the caller (user, guard, `Gate`, `hash_equals`, JWT decode, signed URL),
+  or with 401 after reading a credential (a request header, a credential-named input such as `api_key`, or a
+  validator such as `isValid($request->code)`). A 401 from a business rule (the appointment is invoiced),
+  validation (422) and request-supplied id comparisons are not mistaken for auth. A middleware that hands the
+  request to an auth middleware (`$this->inner->handle($request, $next)`) inherits its protection.
 - **Controller protection**: constructor `$this->middleware(..., ['only' => ...])`, `->only()/->except()`,
   `HasMiddleware::middleware()`, base-controller inheritance, and per-action `Gate::authorize()` /
   `$this->authorize()` / gate-guarded `if` / `abort_unless`
+- **Inline checks** in an action or a private helper it calls (`$this->authorizeSignup($request)`), judged by the
+  same rules as middleware, are reported as the `inline-check` policy
+- **FormRequest `authorize()`**: an action typed with a FormRequest whose `authorize()` (own or from a project
+  base request) can return something other than `true` is reported as `<Request>::authorize`
+- **Reserved routes**: a route closure that only rejects (`abort(403)`, `throw`, a 4xx response) is reported
+  as the `deny-all` policy instead of an unprotected endpoint
 - Each endpoint reports its `handlerLocation` (controller file and line) in JSON output
 - Test suites (`*Test.php`, `TestCase` subclasses) and built-in server router shims (`server.php`) are not reported as endpoints
 

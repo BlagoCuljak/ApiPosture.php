@@ -34,22 +34,6 @@ final class LaravelProjectContext
         'authorize', 'requirepassword',
     ];
 
-    /** Exceptions that signal "not authenticated" (lower-case short names). */
-    private const UNAUTHENTICATED_EXCEPTIONS = [
-        'authenticationexception', 'unauthorizedexception', 'unauthorizedhttpexception',
-        'authenticationcredentialsnotfoundexception', 'badcredentialsexception',
-        'tokeninvalidexception', 'tokenexpiredexception', 'invalidsignatureexception',
-    ];
-
-    /** Exceptions that signal "forbidden" (lower-case short names). */
-    private const FORBIDDEN_EXCEPTIONS = [
-        'accessdeniedhttpexception', 'authorizationexception', 'accessdeniedexception',
-    ];
-
-    /** Calls that show a middleware inspects the caller's identity or a shared secret. */
-    private const IDENTITY_CALLS = ['user', 'guard', 'bearertoken', 'check', 'guest', 'session', 'authenticate', 'hasvalidsignature'];
-    private const IDENTITY_FUNCTIONS = ['auth', 'hash_equals', 'hash_hmac', 'password_verify'];
-
     /** Laravel's default groups, used when the project does not declare its own. */
     private const DEFAULT_GROUPS = [
         'web' => ['EncryptCookies', 'AddQueuedCookiesToResponse', 'StartSession', 'ShareErrorsFromSession', 'VerifyCsrfToken', 'SubstituteBindings'],
@@ -62,7 +46,7 @@ final class LaravelProjectContext
     /** @var array<string, array<int, array{type: string, value: string}>> group (lower) => members */
     private array $groups = [];
 
-    /** @var array<string, array{extends: ?string, auth: bool}> class FQN (lower) => middleware facts */
+    /** @var array<string, array{extends: ?string, auth: bool, delegates: string[]}> class FQN (lower) => middleware facts */
     private array $middlewareClasses = [];
 
     /** @var array<int, array{source: string, path: string, prefix: string, middleware: string[]}> */
@@ -74,9 +58,16 @@ final class LaravelProjectContext
      * @var array<string, array{fqn: string, file: string, extends: ?string,
      *     middleware: array<int, array{name: string, only: ?string[], except: string[]}>,
      *     resourceAuthorized: bool,
-     *     methods: array<string, array{line: int, abilities: string[]}>}>
+     *     methods: array<string, array{line: int, abilities: string[], params: string[]}>}>
      */
     private array $classes = [];
+
+    /**
+     * Classes declaring authorize() (FormRequests): lower FQN => whether it can deny, and its parent.
+     *
+     * @var array<string, array{denies: bool, extends: ?string}>
+     */
+    private array $formRequests = [];
 
     /** @var array<string, string[]> lower short class name => lower FQNs */
     private array $shortIndex = [];
@@ -89,9 +80,12 @@ final class LaravelProjectContext
 
     private LaravelEndpointDiscoverer $routeDiscoverer;
 
+    private InlineAuthAnalyzer $inlineAuth;
+
     public function __construct()
     {
         $this->routeDiscoverer = new LaravelEndpointDiscoverer();
+        $this->inlineAuth = new InlineAuthAnalyzer();
     }
 
     /**
@@ -314,69 +308,49 @@ final class LaravelProjectContext
 
         $this->middlewareClasses[strtolower($fqn)] = [
             'extends' => $extends,
-            'auth' => $handle !== null && $this->handleEnforcesAuth($handle),
+            'auth' => $handle !== null && $this->inlineAuth->enforcesAuth($handle->stmts ?? []),
+            'delegates' => $handle !== null ? $this->delegatedMiddleware($class, $handle) : [],
         ];
     }
 
     /**
-     * A middleware enforces authentication when handle() rejects with 401 / an unauthenticated
-     * exception, or rejects with 403 after inspecting the caller's identity or a shared secret.
+     * Middleware that handle() hands the request to: $this->inner->handle($request, $next, ...)
+     * or (new Inner())->handle(...). The property's class comes from a typed or promoted property.
+     *
+     * @return string[] class FQNs
      */
-    private function handleEnforcesAuth(Stmt\ClassMethod $handle, bool $requireIdentity = false): bool
+    private function delegatedMiddleware(Stmt\Class_ $class, Stmt\ClassMethod $handle): array
     {
+        $propertyTypes = [];
+        foreach ($class->getProperties() as $property) {
+            if ($property->type instanceof Node\Name) {
+                foreach ($property->props as $prop) {
+                    $propertyTypes[strtolower($prop->name->toString())] = $this->resolvedName($property->type);
+                }
+            }
+        }
+        $constructor = $class->getMethod('__construct');
+        foreach ($constructor?->params ?? [] as $param) {
+            if ($param->flags !== 0 && $param->type instanceof Node\Name && $param->var instanceof Expr\Variable && is_string($param->var->name)) {
+                $propertyTypes[strtolower($param->var->name)] = $this->resolvedName($param->type);
+            }
+        }
+
+        $delegates = [];
         $finder = new NodeFinder();
-        $stmts = $handle->stmts ?? [];
-
-        $unauthenticated = $finder->findFirst($stmts, function (Node $n) {
-            if ($n instanceof Node\Scalar\Int_ && $n->value === 401) {
-                return true;
+        foreach ($finder->findInstanceOf($handle->stmts ?? [], Expr\MethodCall::class) as $call) {
+            if (!$call->name instanceof Node\Identifier || strtolower($call->name->toString()) !== 'handle') {
+                continue;
             }
-            if ($n instanceof Expr\ClassConstFetch && $n->name instanceof Node\Identifier
-                && strtoupper($n->name->toString()) === 'HTTP_UNAUTHORIZED') {
-                return true;
+            $target = $call->var;
+            if ($target instanceof Expr\PropertyFetch && $target->var instanceof Expr\Variable && $target->var->name === 'this'
+                && $target->name instanceof Node\Identifier && isset($propertyTypes[strtolower($target->name->toString())])) {
+                $delegates[] = $propertyTypes[strtolower($target->name->toString())];
+            } elseif ($target instanceof Expr\New_ && $target->class instanceof Node\Name) {
+                $delegates[] = $this->resolvedName($target->class);
             }
-            if ($n instanceof Expr\New_ && $n->class instanceof Node\Name
-                && in_array(strtolower($n->class->getLast()), self::UNAUTHENTICATED_EXCEPTIONS, true)) {
-                return true;
-            }
-            // Delegating to Laravel's Authenticate internals
-            return $n instanceof Expr\MethodCall && $n->name instanceof Node\Identifier
-                && in_array(strtolower($n->name->toString()), ['unauthenticated', 'authenticate'], true)
-                && $n->var instanceof Expr\Variable && $n->var->name === 'this';
-        });
-        if ($unauthenticated !== null && !$requireIdentity) {
-            return true;
         }
-
-        $forbidden = $finder->findFirst($stmts, function (Node $n) {
-            if ($n instanceof Node\Scalar\Int_ && $n->value === 403) {
-                return true;
-            }
-            if ($n instanceof Expr\ClassConstFetch && $n->name instanceof Node\Identifier
-                && strtoupper($n->name->toString()) === 'HTTP_FORBIDDEN') {
-                return true;
-            }
-            return $n instanceof Expr\New_ && $n->class instanceof Node\Name
-                && in_array(strtolower($n->class->getLast()), self::FORBIDDEN_EXCEPTIONS, true);
-        });
-        if ($forbidden === null && $unauthenticated === null) {
-            return false;
-        }
-
-        $identity = $finder->findFirst($stmts, function (Node $n) {
-            if (($n instanceof Expr\MethodCall || $n instanceof Expr\NullsafeMethodCall) && $n->name instanceof Node\Identifier
-                && in_array(strtolower($n->name->toString()), self::IDENTITY_CALLS, true)) {
-                return true;
-            }
-            if ($n instanceof Expr\FuncCall && $n->name instanceof Node\Name
-                && in_array(strtolower($n->name->getLast()), self::IDENTITY_FUNCTIONS, true)) {
-                return true;
-            }
-            return $n instanceof Expr\StaticCall && $n->class instanceof Node\Name
-                && in_array(strtolower($n->class->getLast()), ['auth', 'gate', 'hash'], true);
-        });
-
-        return $identity !== null;
+        return array_values(array_unique($delegates));
     }
 
     private function addAliases(Expr\Array_ $array): void
@@ -447,6 +421,12 @@ final class LaravelProjectContext
             if ($method !== null) {
                 $abilities = $method['abilities'];
                 $handlerLocation ??= new SourceLocation($root . '/' . $method['file'], $method['line']);
+                // A FormRequest whose authorize() can deny runs before the action.
+                foreach ($method['params'] ?? [] as $paramClass) {
+                    if ($this->formRequestDenies(strtolower($paramClass), [])) {
+                        $abilities[] = $this->shortName($paramClass) . '::authorize';
+                    }
+                }
             }
             if ($this->resourceAuthorized($controller, [])) {
                 $abilities[] = $action;
@@ -642,6 +622,11 @@ final class LaravelProjectContext
         if ($facts['auth']) {
             return true;
         }
+        foreach ($facts['delegates'] as $delegate) {
+            if ($this->classIsAuth(strtolower($delegate), $visiting)) {
+                return true;
+            }
+        }
         return $facts['extends'] !== null && $this->classIsAuth(strtolower($facts['extends']), $visiting);
     }
 
@@ -681,6 +666,26 @@ final class LaravelProjectContext
             return;
         }
 
+        $authorize = $class->getMethod('authorize');
+        if ($authorize !== null && !$authorize->isStatic() && $class->extends !== null) {
+            $this->formRequests[strtolower($fqn)] = [
+                'denies' => $this->inlineAuth->authorizeMethodDenies($authorize),
+                'extends' => strtolower($this->resolvedName($class->extends)),
+            ];
+        } elseif ($class->extends !== null) {
+            // Inherits authorize() from a project base request, if any.
+            $this->formRequests[strtolower($fqn)] ??= ['denies' => false, 'extends' => strtolower($this->resolvedName($class->extends))];
+        }
+
+        // Inline enforcement per method, including private helpers (authorizeSignup(), gatewayClaims()).
+        $enforces = [];
+        $helperCalls = [];
+        foreach ($class->getMethods() as $method) {
+            $name = strtolower($method->name->toString());
+            $enforces[$name] = $this->inlineAuth->enforcesAuth($method->stmts ?? []);
+            $helperCalls[$name] = $this->inlineAuth->calledOwnMethods($method->stmts ?? []);
+        }
+
         $methods = [];
         $middleware = [];
         $resourceAuthorized = false;
@@ -700,15 +705,17 @@ final class LaravelProjectContext
                 continue;
             }
             $abilities = $this->gateAbilities($method);
-            // Inline enforcement: rejects with 401/403 based on the authenticated identity or a secret.
-            // A comparison against request-supplied ids alone (user_uuid === ...) does not count.
-            if ($abilities === [] && $this->handleEnforcesAuth($method, true)) {
+            // Inline enforcement: rejects with 401/403 based on the authenticated identity or a credential,
+            // directly or through a helper of the same class. A comparison against request-supplied ids
+            // alone (user_uuid === ...) does not count.
+            if ($abilities === [] && $this->enforcesThroughHelpers($name, $enforces, $helperCalls, [])) {
                 $abilities[] = 'inline-check';
             }
             $methods[$name] = [
                 'line' => $method->getStartLine(),
                 'file' => $relativePath,
                 'abilities' => $abilities,
+                'params' => $this->parameterClasses($method),
             ];
         }
 
@@ -726,6 +733,57 @@ final class LaravelProjectContext
             'methods' => $methods,
         ];
         $this->shortIndex[strtolower($this->shortName($fqn))][] = $key;
+    }
+
+    /**
+     * @param array<string, bool> $enforces
+     * @param array<string, string[]> $helperCalls
+     * @param array<string, bool> $visiting
+     */
+    private function enforcesThroughHelpers(string $method, array $enforces, array $helperCalls, array $visiting): bool
+    {
+        if (isset($visiting[$method]) || !isset($enforces[$method])) {
+            return false;
+        }
+        if ($enforces[$method]) {
+            return true;
+        }
+        $visiting[$method] = true;
+        foreach ($helperCalls[$method] ?? [] as $helper) {
+            if ($this->enforcesThroughHelpers($helper, $enforces, $helperCalls, $visiting)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Class-typed parameters of an action (resolved FQNs): candidates for FormRequests.
+     *
+     * @return string[]
+     */
+    private function parameterClasses(Stmt\ClassMethod $method): array
+    {
+        $classes = [];
+        foreach ($method->params as $param) {
+            if ($param->type instanceof Node\Name) {
+                $classes[] = $this->resolvedName($param->type);
+            }
+        }
+        return $classes;
+    }
+
+    /**
+     * Whether a FormRequest (or a project base request it extends) declares an authorize() that can deny.
+     */
+    private function formRequestDenies(string $class, array $visiting): bool
+    {
+        if (isset($visiting[$class]) || !isset($this->formRequests[$class])) {
+            return false;
+        }
+        $visiting[$class] = true;
+        $facts = $this->formRequests[$class];
+        return $facts['denies'] || ($facts['extends'] !== null && $this->formRequestDenies($facts['extends'], $visiting));
     }
 
     /**
@@ -959,7 +1017,7 @@ final class LaravelProjectContext
     }
 
     /**
-     * @return array{line: int, file: string, abilities: string[]}|null
+     * @return array{line: int, file: string, abilities: string[], params: string[]}|null
      */
     private function findMethod(string $class, string $action, array $visiting): ?array
     {

@@ -521,6 +521,9 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         );
 
         $authInfo = $this->resolveAuthFromMiddleware($allMiddleware);
+        if (isset($args[$pathIndex + 1])) {
+            $authInfo = $this->withClosureAuth($authInfo, $args[$pathIndex + 1]->value);
+        }
 
         return new Endpoint(
             route: $fullPath,
@@ -1302,6 +1305,38 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
             policies: array_unique($policies),
             middleware: $allMiddleware,
             inheritedFrom: $inheritedFrom,
+        );
+    }
+
+    /**
+     * Protection that lives in a route closure itself:
+     *  - a body that only rejects (abort(403), throw, return a 4xx response) reserves the URL: 'deny-all';
+     *  - an inline 401/403 based on the caller's identity or a credential: 'inline-check'.
+     */
+    private function withClosureAuth(AuthorizationInfo $auth, Expr $action): AuthorizationInfo
+    {
+        $analyzer = new InlineAuthAnalyzer();
+        if ($action instanceof Expr\ArrowFunction) {
+            $policy = $analyzer->isRejection($action->expr) ? 'deny-all' : null;
+        } elseif ($action instanceof Expr\Closure) {
+            $policy = match (true) {
+                $analyzer->deniesAll($action->stmts) => 'deny-all',
+                $analyzer->enforcesAuth($action->stmts) => 'inline-check',
+                default => null,
+            };
+        } else {
+            return $auth;
+        }
+        if ($policy === null) {
+            return $auth;
+        }
+        return new AuthorizationInfo(
+            hasAuth: true,
+            hasAllowAnonymous: $auth->hasAllowAnonymous,
+            roles: $auth->roles,
+            policies: array_values(array_unique([...$auth->policies, $policy])),
+            middleware: $auth->middleware,
+            inheritedFrom: $auth->inheritedFrom,
         );
     }
 

@@ -25,5 +25,8 @@ class Kernel extends HttpKernel
         'trial' => \App\Http\Middleware\CheckTrial::class,
         'staff' => \App\Http\Middleware\EnsureStaff::class,
         'validate.email' => \App\Http\Middleware\ValidateEmail::class,
+        'invoiced' => \App\Http\Middleware\CheckInvoiced::class,
+        'otp' => \App\Http\Middleware\ValidateOtp::class,
+        'gateway.or.staff' => \App\Http\Middleware\ValidateGatewayOrStaff::class,
     ];
 }

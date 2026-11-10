@@ -110,6 +110,61 @@ final class LaravelProjectContextTest extends TestCase
         $this->assertFalse($this->endpoint('LaravelProject', 'POST /newsletter')->authorization->hasAuth, '422 validation is not auth');
     }
 
+    public function testUnauthorizedStatusFromBusinessRuleIsNotAuth(): void
+    {
+        $this->assertFalse(
+            $this->endpoint('LaravelProject', 'POST /appointments/refund')->authorization->hasAuth,
+            '401 when an appointment is invoiced, without looking at the caller',
+        );
+        $this->assertTrue(
+            $this->endpoint('LaravelProject', 'POST /signup/otp')->authorization->hasAuth,
+            '401 after verifying a request-supplied one-time code',
+        );
+    }
+
+    public function testMiddlewareDelegatingToAuthMiddlewareIsAuth(): void
+    {
+        $this->assertTrue($this->endpoint('LaravelProject', 'POST /validate/email')->authorization->hasAuth);
+    }
+
+    public function testFormRequestAuthorizeCountsWhenItCanDeny(): void
+    {
+        $update = $this->endpoint('LaravelProject', 'POST /profile/update');
+        $staff = $this->endpoint('LaravelProject', 'POST /profile/staff');
+
+        $this->assertTrue($update->authorization->hasAuth);
+        $this->assertContains('UpdateProfileRequest::authorize', $update->authorization->policies);
+        $this->assertTrue($staff->authorization->hasAuth, 'authorize() inherited from a project base request');
+        $this->assertFalse(
+            $this->endpoint('LaravelProject', 'POST /profile/open')->authorization->hasAuth,
+            'authorize() that returns true is not protection',
+        );
+    }
+
+    public function testInlineCheckInPrivateHelperIsInherited(): void
+    {
+        $signup = $this->endpoint('LaravelProject', 'POST /signup');
+
+        $this->assertTrue($signup->authorization->hasAuth, 'JWT decode + abort_if(401) in a helper');
+        $this->assertContains('inline-check', $signup->authorization->policies);
+        $this->assertFalse(
+            $this->endpoint('LaravelProject', 'POST /signup/draft')->authorization->hasAuth,
+            'helper comparing request-supplied ids is not authentication',
+        );
+    }
+
+    public function testClosureThatOnlyRejectsReservesTheRoute(): void
+    {
+        $cache = $this->endpoint('LaravelProject', 'DELETE /cache');
+        $export = $this->endpoint('LaravelProject', 'POST /legacy/export');
+        $import = $this->endpoint('LaravelProject', 'POST /legacy/import');
+
+        $this->assertContains('deny-all', $cache->authorization->policies);
+        $this->assertContains('deny-all', $export->authorization->policies, 'arrow function returning a 4xx response');
+        $this->assertContains('inline-check', $import->authorization->policies, 'closure verifying a shared secret');
+        $this->assertFalse($this->endpoint('LaravelProject', 'POST /legacy/echo')->authorization->hasAuth);
+    }
+
     public function testModuleRoutesStayPublicWithoutProtection(): void
     {
         $endpoint = $this->endpoint('LaravelProject', 'POST /api/billing/invoices');

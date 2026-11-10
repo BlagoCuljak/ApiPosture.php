@@ -90,7 +90,7 @@ final class HtmlFormatter implements OutputFormatterInterface
 
     private function renderFinding(Finding $finding): string
     {
-        $sev = strtolower($finding->severity->name());
+        $sev = strtolower($finding->severity->name);
         $lines = [];
         $lines[] = '<div class="finding ' . htmlspecialchars($sev) . '">';
         $lines[] = '  <span class="severity-badge severity-' . htmlspecialchars($sev) . '">' . htmlspecialchars($finding->severity->label()) . '</span>';

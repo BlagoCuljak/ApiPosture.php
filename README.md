@@ -110,12 +110,27 @@ vendor/bin/apiposture scan . --config .apiposture.json
 ## Supported Frameworks
 
 ### Laravel
-- `Route::get()`, `Route::post()`, `Route::put()`, `Route::delete()`, `Route::patch()`
-- `Route::middleware(['auth'])->group(...)` with nested routes
-- `Route::prefix('/api')->group(...)` with path prefixes
-- Controller middleware via `$this->middleware('auth')` in constructors
-- `#[Middleware('auth')]` attributes (Laravel 11+)
-- Auth detection: `auth`, `auth:sanctum`, `auth:api`, `role:*`, `can:*`, `guest`
+- `Route::get()`, `Route::post()`, `Route::put()`, `Route::delete()`, `Route::patch()`, `Route::match()`, `Route::any()`
+- `Route::resource()` / `Route::apiResource()` (with `only` / `except` and nested names)
+- Groups in every form: `Route::group([...], fn)`, `Route::middleware(...)->prefix(...)->group(...)`,
+  `Route::controller(X::class)->group(...)`, arrow-function groups, nested groups and group `namespace`
+- Trailing chains: `->name()`, `->middleware()`, `->withoutMiddleware()`, `->can()`
+- Legacy action arrays: `['as' => ..., 'middleware' => ..., 'uses' => 'Controller@method']`
+- Auth detection: `auth`, `auth:sanctum`, `auth:api`, `auth.*`, `role:*`, `can:*`, `guest`, dynamic guards (`'auth:' . $guard`)
+
+**Project-wide resolution** — the scanner reads the whole application, not just route files:
+- **Route file mounts**: prefixes and middleware from `RouteServiceProvider` (`->group(base_path(...))`,
+  `require` inside a group), module providers (`module_path(...)`, `loadRoutesFrom(...)`) and
+  Laravel 11 `bootstrap/app.php` `withRouting(api: ..., apiPrefix: ...)`
+- **Middleware aliases and groups** from `Http\Kernel` and `bootstrap/app.php` (`$middleware->alias()`, `->group()`, `->api(append: ...)`)
+- **Custom auth middleware detected by behaviour**: a middleware counts as authentication when its `handle()`
+  rejects with 401 / an unauthenticated exception, or with 403 after inspecting the user, a token or a shared
+  secret (`hash_equals`). Validation (422) and business rules are not mistaken for auth.
+- **Controller protection**: constructor `$this->middleware(..., ['only' => ...])`, `->only()/->except()`,
+  `HasMiddleware::middleware()`, base-controller inheritance, and per-action `Gate::authorize()` /
+  `$this->authorize()` / gate-guarded `if` / `abort_unless`
+- Each endpoint reports its `handlerLocation` (controller file and line) in JSON output
+- Test suites (`*Test.php`, `TestCase` subclasses) and built-in server router shims (`server.php`) are not reported as endpoints
 
 ### Symfony
 - `#[Route('/path', methods: ['GET'])]` attributes

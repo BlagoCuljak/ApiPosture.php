@@ -22,6 +22,8 @@ final class Endpoint
         public SecurityClassification $classification = SecurityClassification::Public,
         public readonly ?string $controllerName = null,
         public readonly ?string $actionName = null,
+        /** Where the handling controller method is defined, when it could be resolved. */
+        public readonly ?SourceLocation $handlerLocation = null,
     ) {}
 
     public function hasWriteMethods(): bool
@@ -50,6 +52,7 @@ final class Endpoint
             'classification' => $this->classification->value,
             'controllerName' => $this->controllerName,
             'actionName' => $this->actionName,
+            'handlerLocation' => $this->handlerLocation?->toArray(),
         ];
     }
 }

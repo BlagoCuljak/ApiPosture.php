@@ -8,6 +8,7 @@ use ApiPosture\Core\Classification\SecurityClassifier;
 use ApiPosture\Core\Config\Configuration;
 use ApiPosture\Core\Discovery\EndpointDiscovererInterface;
 use ApiPosture\Core\Discovery\LaravelEndpointDiscoverer;
+use ApiPosture\Core\Discovery\LaravelProjectContext;
 use ApiPosture\Core\Discovery\PlainPhpEndpointDiscoverer;
 use ApiPosture\Core\Discovery\SlimEndpointDiscoverer;
 use ApiPosture\Core\Discovery\SymfonyEndpointDiscoverer;
@@ -59,6 +60,8 @@ final class ProjectAnalyzer
         $allEndpoints = [];
         $scannedFiles = [];
         $failedFiles = [];
+        $laravelContext = new LaravelProjectContext();
+        $rootPath = str_replace('\\', '/', realpath($path) ?: $path);
 
         // 2. Parse each file and run discoverers
         foreach ($phpFiles as $file) {
@@ -86,15 +89,25 @@ final class ProjectAnalyzer
                         $allEndpoints = array_merge($allEndpoints, $endpoints);
                     }
                 }
+
+                // Cross-file Laravel facts: route file mounts, middleware aliases/groups, auth middleware.
+                $relative = str_replace('\\', '/', $filePath);
+                if (str_starts_with($relative, $rootPath . '/')) {
+                    $relative = substr($relative, strlen($rootPath) + 1);
+                }
+                $laravelContext->collect($ast, $relative);
             } catch (\Throwable) {
                 $failedFiles[] = $filePath;
             }
         }
 
-        // 3. Classify all endpoints
+        // 3. Resolve route prefixes and middleware that are defined in other files
+        $allEndpoints = $laravelContext->apply($allEndpoints, $rootPath);
+
+        // 4. Classify all endpoints
         $allEndpoints = $this->classifier->classifyAll($allEndpoints);
 
-        // 4. Run rule engine
+        // 5. Run rule engine
         $findings = $this->ruleEngine->evaluate($allEndpoints);
 
         $duration = microtime(true) - $startTime;

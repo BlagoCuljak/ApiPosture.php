@@ -76,6 +76,127 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         return $endpoints;
     }
 
+    /** @var array<int, array{path: string, prefix: string, middleware: string[]}> */
+    private array $mounts = [];
+
+    /**
+     * Collect route files this file mounts, with the prefix and middleware they are mounted under.
+     * Covers RouteServiceProvider/module providers (->group(base_path(...)), require inside a group,
+     * $this->loadRoutesFrom(...)) and Laravel 11 bootstrap/app.php ->withRouting(api: ..., web: ...).
+     *
+     * @param Node[] $ast
+     * @return array<int, array{path: string, prefix: string, middleware: string[]}>
+     */
+    public function collectRouteMounts(array $ast): array
+    {
+        $this->mounts = [];
+        $emptyContext = ['middleware' => [], 'without' => [], 'prefixes' => [], 'controller' => null];
+        $finder = new NodeFinder();
+
+        // Top-level statements plus every function/method body (providers register routes in methods).
+        $bodies = [$ast];
+        foreach ($finder->find($ast, fn(Node $n) => $n instanceof Stmt\ClassMethod || $n instanceof Stmt\Function_) as $fn) {
+            $bodies[] = $fn->stmts ?? [];
+        }
+        foreach ($bodies as $stmts) {
+            $this->discoverRouteDefinitionsRecursive($stmts, '', $emptyContext);
+        }
+
+        // $this->loadRoutesFrom(__DIR__ . '/../routes/api.php')
+        foreach ($finder->find($ast, fn(Node $n) => $n instanceof Expr\MethodCall
+            && $n->name instanceof Node\Identifier
+            && strtolower($n->name->toString()) === 'loadroutesfrom') as $call) {
+            if (isset($this->callArgs($call)[0])) {
+                $this->recordMount($this->callArgs($call)[0]->value, $emptyContext);
+            }
+        }
+
+        // Laravel 11+: Application::configure()->withRouting(web: ..., api: ..., apiPrefix: 'api')
+        foreach ($finder->find($ast, fn(Node $n) => $n instanceof Expr\MethodCall
+            && $n->name instanceof Node\Identifier
+            && strtolower($n->name->toString()) === 'withrouting') as $call) {
+            $named = [];
+            foreach ($this->callArgs($call) as $arg) {
+                if ($arg->name !== null) {
+                    $named[$arg->name->toString()] = $arg->value;
+                }
+            }
+            $apiPrefix = isset($named['apiPrefix']) ? ($this->resolveStringValue($named['apiPrefix']) ?? 'api') : 'api';
+            foreach (['web' => ['web', ''], 'api' => ['api', $apiPrefix]] as $key => [$group, $prefix]) {
+                if (!isset($named[$key])) {
+                    continue;
+                }
+                $paths = $named[$key] instanceof Expr\Array_
+                    ? array_map(fn($i) => $i->value, array_filter($named[$key]->items))
+                    : [$named[$key]];
+                foreach ($paths as $pathExpr) {
+                    $this->recordMount($pathExpr, [
+                        'middleware' => [$group], 'without' => [],
+                        'prefixes' => $prefix !== '' ? [$prefix] : [], 'controller' => null,
+                    ]);
+                }
+            }
+        }
+
+        $mounts = $this->mounts;
+        $this->mounts = [];
+
+        $unique = [];
+        foreach ($mounts as $mount) {
+            $unique[md5(serialize($mount))] = $mount;
+        }
+        return array_values($unique);
+    }
+
+    /**
+     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string, namespaces?: string[]} $context
+     */
+    private function recordMount(Expr $pathExpr, array $context): void
+    {
+        $path = $this->resolveRouteFilePath($pathExpr);
+        if ($path === null) {
+            return;
+        }
+        $prefix = $this->buildFullPath($context['prefixes'], '');
+        $this->mounts[] = [
+            'path' => $path,
+            'prefix' => $prefix === '/' ? '' : $prefix,
+            'middleware' => $this->removeMiddleware($context['middleware'], $context['without']),
+        ];
+    }
+
+    /**
+     * Best-effort relative path of a route file from expressions such as base_path('routes/api.php'),
+     * __DIR__ . '/../routes/api.php' or module_path($this->name, '/routes/api.php').
+     * Returns a normalized suffix like 'routes/api.php', or null when not statically resolvable.
+     */
+    private function resolveRouteFilePath(Expr $expr): ?string
+    {
+        if ($expr instanceof Expr\Closure || $expr instanceof Expr\ArrowFunction || $expr instanceof Expr\Array_) {
+            return null;
+        }
+        $strings = $expr instanceof Node\Scalar\String_
+            ? [$expr]
+            : (new NodeFinder())->findInstanceOf($expr, Node\Scalar\String_::class);
+        $candidate = null;
+        foreach ($strings as $string) {
+            if (str_ends_with(strtolower($string->value), '.php')) {
+                $candidate = $string->value;
+            }
+        }
+        if ($candidate === null) {
+            return null;
+        }
+        $segments = [];
+        foreach (explode('/', str_replace('\\', '/', $candidate)) as $segment) {
+            if ($segment === '' || $segment === '.' || $segment === '..') {
+                continue;
+            }
+            $segments[] = $segment;
+        }
+        return $segments === [] ? null : implode('/', $segments);
+    }
+
     private function discoverRouteDefinitions(array $ast, string $filePath, NodeFinder $finder): array
     {
         return $this->discoverRouteDefinitionsRecursive($ast, $filePath, [
@@ -91,7 +212,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
      * (middleware, excluded middleware, prefixes, group controller).
      *
      * @param Node[] $nodes
-     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string} $context
+     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string, namespaces?: string[]} $context
      * @return Endpoint[]
      */
     private function discoverRouteDefinitionsRecursive(array $nodes, string $filePath, array $context): array
@@ -117,6 +238,12 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
                 continue;
             }
 
+            // require base_path('routes/x.php') inside a group mounts that file under the group context.
+            if ($expr instanceof Expr\Include_) {
+                $this->recordMount($expr->expr, $context);
+                continue;
+            }
+
             // Group call: Route::group([...], fn), Route::middleware(...)->prefix(...)->group(fn), ...
             $groupInfo = $this->extractGroupInfo($expr);
             if ($groupInfo !== null) {
@@ -128,6 +255,17 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
                 }
                 if ($groupInfo['controller'] !== null) {
                     $childContext['controller'] = $groupInfo['controller'];
+                }
+                if ($groupInfo['namespace'] !== null) {
+                    // Nested group namespaces append; a leading backslash makes them absolute.
+                    $childContext['namespaces'] = str_starts_with($groupInfo['namespace'], '\\')
+                        ? [trim($groupInfo['namespace'], '\\')]
+                        : array_merge($context['namespaces'] ?? [], [trim($groupInfo['namespace'], '\\')]);
+                }
+                if ($groupInfo['file'] !== null) {
+                    // ->group(base_path('routes/api.php')): routes live in another file.
+                    $this->recordMount($groupInfo['file'], $childContext);
+                    continue;
                 }
                 $endpoints = array_merge(
                     $endpoints,
@@ -220,7 +358,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
     /**
      * Extract group info (middleware, prefix, controller, closure statements) from a group call.
      *
-     * @return array{middleware: string[], without: string[], prefix: string, controller: ?string, statements: Node[]}|null
+     * @return array{middleware: string[], without: string[], prefix: string, controller: ?string, namespace: ?string, statements: Node[], file: ?Expr}|null
      */
     private function extractGroupInfo(Node $node): ?array
     {
@@ -241,14 +379,18 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         $without = [];
         $prefixes = [];
         $controller = null;
+        $namespace = null;
         $closureStmts = null;
+        $fileExpr = null;
 
-        foreach ($node->getArgs() as $arg) {
+        foreach ($this->callArgs($node) as $arg) {
             $value = $arg->value;
             if ($value instanceof Expr\Closure) {
                 $closureStmts = $value->stmts;
             } elseif ($value instanceof Expr\ArrowFunction) {
                 $closureStmts = [new Stmt\Expression($value->expr)];
+            } elseif ($this->resolveRouteFilePath($value) !== null) {
+                $fileExpr = $value;
             } elseif ($value instanceof Expr\Array_) {
                 // Route::group(['prefix' => '...', 'middleware' => ..., 'controller' => ...], fn)
                 foreach ($value->items as $item) {
@@ -264,13 +406,15 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
                         $without = array_merge($without, $this->resolveMiddlewareValues($item->value));
                     } elseif ($key === 'controller' && $item->value instanceof Expr\ClassConstFetch) {
                         $controller = $this->resolveClassName($item->value);
+                    } elseif ($key === 'namespace') {
+                        $namespace = $this->resolveStringValue($item->value) ?? $namespace;
                     }
                 }
             }
         }
 
-        // A group whose body is not a closure (e.g. ->group(base_path('routes/api.php'))) is not walkable here.
-        if ($closureStmts === null) {
+        // A group must either have a closure body or load a route file.
+        if ($closureStmts === null && $fileExpr === null) {
             return null;
         }
 
@@ -279,7 +423,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         while ($current instanceof Expr\MethodCall || $current instanceof Expr\StaticCall) {
             if ($current->name instanceof Node\Identifier) {
                 $callName = strtolower($current->name->toString());
-                $args = $current->getArgs();
+                $args = $this->callArgs($current);
                 if ($callName === 'middleware') {
                     $middleware = array_merge($middleware, $this->extractChainMiddlewareArgs($current));
                 } elseif ($callName === 'withoutmiddleware') {
@@ -295,6 +439,8 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
                     }
                 } elseif ($callName === 'controller' && count($args) > 0 && $args[0]->value instanceof Expr\ClassConstFetch) {
                     $controller = $this->resolveClassName($args[0]->value);
+                } elseif ($callName === 'namespace' && count($args) > 0) {
+                    $namespace = $this->resolveStringValue($args[0]->value) ?? $namespace;
                 }
             }
 
@@ -311,7 +457,9 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
             'without' => $without,
             'prefix' => $prefix === '/' ? '' : $prefix,
             'controller' => $controller,
-            'statements' => $closureStmts,
+            'namespace' => $namespace !== null && trim($namespace, '\\') !== '' ? $namespace : null,
+            'statements' => $closureStmts ?? [],
+            'file' => $fileExpr,
         ];
     }
 
@@ -319,7 +467,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
      * Parse a route call with accumulated context from parent groups.
      *
      * @param Expr\MethodCall[] $trailing
-     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string} $context
+     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string, namespaces?: string[]} $context
      */
     private function parseRouteCallWithContext(Node $node, array $trailing, string $filePath, array $context): ?Endpoint
     {
@@ -336,7 +484,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         $isMatch = $node->name instanceof Node\Identifier && strtolower($node->name->toString()) === 'match';
         $pathIndex = $isMatch ? 1 : 0;
 
-        $args = $node->getArgs();
+        $args = $this->callArgs($node);
         if (count($args) <= $pathIndex) {
             return null;
         }
@@ -353,12 +501,18 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         $actionName = null;
         if (isset($args[$pathIndex + 1])) {
             [$controllerName, $actionName] = $this->resolveControllerAction($args[$pathIndex + 1]->value, $context['controller']);
+            // 'UserController@update' is relative to the enclosing group namespaces.
+            if ($controllerName !== null && ($context['namespaces'] ?? []) !== []
+                && !str_starts_with($controllerName, '\\') && $this->isStringControllerAction($args[$pathIndex + 1]->value)) {
+                $controllerName = implode('\\', $context['namespaces']) . '\\' . $controllerName;
+            }
         }
 
-        // Middleware: group context + registrar chain before the verb + trailing chain after it.
+        // Middleware: group context + registrar chain before the verb + action array + trailing chain.
         $allMiddleware = array_merge(
             $context['middleware'],
             $this->getChainMiddleware($node),
+            isset($args[$pathIndex + 1]) ? $this->getActionArrayMiddleware($args[$pathIndex + 1]->value) : [],
             $this->getTrailingMiddleware($trailing),
         );
         $allMiddleware = $this->removeMiddleware(
@@ -383,14 +537,14 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
      * Expand Route::resource / apiResource / resources / apiResources into their RESTful endpoints.
      *
      * @param Expr\MethodCall[] $trailing
-     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string} $context
+     * @param array{middleware: string[], without: string[], prefixes: string[], controller: ?string, namespaces?: string[]} $context
      * @return Endpoint[]
      */
     private function parseResourceCall(Expr\StaticCall|Expr\MethodCall $call, array $trailing, string $filePath, array $context): array
     {
         $verb = strtolower($call->name->toString());
         $isApi = str_starts_with($verb, 'api');
-        $args = $call->getArgs();
+        $args = $this->callArgs($call);
         if (count($args) < 1) {
             return [];
         }
@@ -437,7 +591,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         }
         foreach ($trailing as $t) {
             $tName = $t->name instanceof Node\Identifier ? strtolower($t->name->toString()) : '';
-            $tArgs = $t->getArgs();
+            $tArgs = $this->callArgs($t);
             if ($tName === 'only' && count($tArgs) > 0) {
                 $only = $this->resolveStringList($tArgs[0]->value);
             } elseif ($tName === 'except' && count($tArgs) > 0) {
@@ -545,6 +699,43 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
         return $left . '/' . $right;
     }
 
+    private function isStringControllerAction(Expr $action): bool
+    {
+        if ($action instanceof Node\Scalar\String_) {
+            return true;
+        }
+        if (!$action instanceof Expr\Array_) {
+            return false;
+        }
+        foreach ($action->items as $index => $item) {
+            if ($item?->key instanceof Node\Scalar\String_ && $item->key->value === 'uses') {
+                return $item->value instanceof Node\Scalar\String_;
+            }
+            if ($index === 0 && $item?->key === null) {
+                return $item?->value instanceof Node\Scalar\String_;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Middleware declared inside a legacy action array: ['middleware' => 'auth', 'uses' => ...].
+     *
+     * @return string[]
+     */
+    private function getActionArrayMiddleware(Expr $action): array
+    {
+        if (!$action instanceof Expr\Array_) {
+            return [];
+        }
+        foreach ($action->items as $item) {
+            if ($item?->key instanceof Node\Scalar\String_ && $item->key->value === 'middleware') {
+                return $this->resolveMiddlewareValues($item->value);
+            }
+        }
+        return [];
+    }
+
     /**
      * @param Expr\MethodCall[] $trailing
      * @return string[]
@@ -559,9 +750,9 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
             $name = strtolower($call->name->toString());
             if ($name === 'middleware') {
                 $middleware = array_merge($middleware, $this->extractChainMiddlewareArgs($call));
-            } elseif ($name === 'can' && count($call->getArgs()) > 0) {
+            } elseif ($name === 'can' && count($this->callArgs($call)) > 0) {
                 // Route::put(...)->can('update', 'post') is sugar for ->middleware('can:update,post')
-                $ability = $this->resolveStringValue($call->getArgs()[0]->value);
+                $ability = $this->resolveStringValue($this->callArgs($call)[0]->value);
                 $middleware[] = 'can:' . ($ability ?? '*');
             }
         }
@@ -741,7 +932,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
      */
     private function resolveMatchMethods(Node $node): ?array
     {
-        $args = $node->getArgs();
+        $args = $this->callArgs($node);
         if (count($args) < 1) {
             return null;
         }
@@ -918,7 +1109,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
     private function extractMiddlewareNames(Expr\MethodCall $call): array
     {
         $middleware = [];
-        foreach ($call->getArgs() as $arg) {
+        foreach ($this->callArgs($call) as $arg) {
             if ($arg->value instanceof Node\Scalar\String_) {
                 $middleware[] = $arg->value->value;
             } elseif ($arg->value instanceof Expr\Array_) {
@@ -972,7 +1163,7 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
     private function extractChainMiddlewareArgs(Node $call): array
     {
         $middleware = [];
-        foreach ($call->getArgs() as $arg) {
+        foreach ($this->callArgs($call) as $arg) {
             $middleware = array_merge($middleware, $this->resolveMiddlewareValues($arg->value));
         }
         return $middleware;
@@ -1068,6 +1259,11 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
                 }
             }
 
+            // Laravel convention: custom guards are aliased auth.<something> (auth.session, auth.agent, auth.entity:pro)
+            if (str_starts_with($mwLower, 'auth.')) {
+                $hasAuth = true;
+            }
+
             // Check anonymous middleware
             if (in_array($mwLower, array_map('strtolower', self::ANONYMOUS_MIDDLEWARE), true)) {
                 $hasAllowAnonymous = true;
@@ -1114,6 +1310,23 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
      */
     private function resolveControllerAction(Expr $expr, ?string $groupController = null): array
     {
+        // Legacy action array: ['as' => 'name', 'middleware' => 'auth', 'uses' => 'Controller@method']
+        if ($expr instanceof Expr\Array_) {
+            $isKeyed = false;
+            foreach ($expr->items as $item) {
+                if ($item?->key instanceof Node\Scalar\String_) {
+                    $isKeyed = true;
+                    if ($item->key->value === 'uses') {
+                        return $this->resolveControllerAction($item->value, $groupController);
+                    }
+                }
+            }
+            if ($isKeyed) {
+                // ['as' => 'name', fn () => ...] — a named closure route with no controller.
+                return [null, null];
+            }
+        }
+
         // Invokable controller: Route::put('/profile', ProfileSyncController::class)
         if ($expr instanceof Expr\ClassConstFetch && $expr->name instanceof Node\Identifier
             && strtolower($expr->name->toString()) === 'class') {
@@ -1171,5 +1384,15 @@ final class LaravelEndpointDiscoverer implements EndpointDiscovererInterface
             return $left !== null && $right !== null ? $left . $right : null;
         }
         return null;
+    }
+
+    /**
+     * Call arguments, or none for first-class callables (foo(...)), where getArgs() is invalid.
+     *
+     * @return Node\Arg[]
+     */
+    private function callArgs(Expr\CallLike $call): array
+    {
+        return $call->isFirstClassCallable() ? [] : $call->getArgs();
     }
 }

@@ -22,6 +22,7 @@ use ApiPosture\Core\Model\Enums\SortDirection;
 use ApiPosture\Core\Model\Enums\SortField;
 use ApiPosture\Core\Model\Finding;
 use ApiPosture\Core\Model\ScanResult;
+use ApiPosture\Rules\AP201_HardcodedSecret;
 use ApiPosture\Rules\RuleEngine;
 use PhpParser\ParserFactory;
 use PhpParser\Parser;
@@ -110,6 +111,9 @@ final class ProjectAnalyzer
         // 5. Run rule engine
         $findings = $this->ruleEngine->evaluate($allEndpoints);
 
+        // 6. Hardcoded secrets (file-level rule, independent of endpoints)
+        $findings = array_merge($findings, $this->scanSecrets($path, $rootPath));
+
         $duration = microtime(true) - $startTime;
 
         return new ScanResult(
@@ -120,6 +124,54 @@ final class ProjectAnalyzer
             failedFiles: $failedFiles,
             duration: $duration,
         );
+    }
+
+    /**
+     * @return Finding[]
+     */
+    private function scanSecrets(string $path, string $rootPath): array
+    {
+        $rule = new AP201_HardcodedSecret();
+        if (!$this->configuration->isRuleEnabled($rule->getId())) {
+            return [];
+        }
+
+        $finder = new Finder();
+        $finder->files()
+            ->in($path)
+            ->ignoreDotFiles(false)
+            ->ignoreVCS(true)
+            ->name(['*.php', '.env', '.env.*'])
+            ->notPath('vendor')
+            ->notPath('node_modules')
+            ->notPath('.git')
+            ->sortByName();
+
+        $findings = [];
+        foreach ($finder as $file) {
+            $filePath = $file->getRealPath();
+            if ($filePath === false) {
+                continue;
+            }
+            $relative = str_replace('\\', '/', $filePath);
+            if (str_starts_with($relative, $rootPath . '/')) {
+                $relative = substr($relative, strlen($rootPath) + 1);
+            }
+            if (!AP201_HardcodedSecret::shouldScan($relative)) {
+                continue;
+            }
+            $content = @file_get_contents($filePath);
+            if ($content === false) {
+                continue;
+            }
+            foreach ($rule->scanContent($content, $relative, $filePath) as $finding) {
+                if (!$this->configuration->isSuppressed($finding->ruleId, $finding->endpoint->route, null)) {
+                    $findings[] = $finding;
+                }
+            }
+        }
+
+        return $findings;
     }
 
     /**

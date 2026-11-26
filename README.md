@@ -184,6 +184,17 @@ Create `.apiposture.json` in your project root:
 | AP006 | Weak role naming | Low | Generic role names like "user", "admin", "guest" |
 | AP007 | Sensitive route keywords | High/Low | `admin`, `debug`, `export`, `secret` in routes (High without auth, Low with auth) |
 | AP008 | Unprotected endpoint | High/Info | Endpoint with no auth middleware (High for writes, Info for reads) |
+| AP201 | Hardcoded secret | High | Vendor-format credentials committed in `*.php` or `.env` files (see below) |
+
+### AP201: Hardcoded secret
+
+A deliberately high-precision rule. It only reports credentials with a distinctive vendor format: AWS access key IDs, GCP API keys, GitHub and GitLab tokens, Stripe live secret/restricted keys, Slack tokens and webhooks, SendGrid, npm and DigitalOcean tokens, and PEM private keys. Generic heuristics (`password=`, `token=`, JWTs, connection strings) are intentionally not used.
+
+- Scans `*.php` files and committed `.env` files (`.env.example`, `.env.dist` and similar templates are skipped).
+- Skips `test`, `tests`, `spec`, `fixtures`, `testdata`, `samples`, `examples`, `docs`, `vendor`, `node_modules`, `storage`, `bootstrap/cache` and `*Test.php`.
+- Ignores placeholder values (`EXAMPLE`, `XXXX`, `your_`, `changeme`, `dummy`, `fake`, `sample`, `placeholder`, `redacted`, and so on).
+- Reports one finding per file, line and type, and never prints the full secret (first 4 characters only).
+- Disable with `"rules": { "AP201": { "enabled": false } }`, or suppress by file path: `{ "ruleId": "AP201", "route": "config/legacy.php" }`.
 
 *AP002 severity adjusts dynamically: webhooks → Medium, auth/login endpoints → Low, analytics → Low
 
@@ -355,7 +366,7 @@ ApiPosture.php/
 │   │   ├── Config/            # Configuration loader
 │   │   ├── Discovery/         # Laravel, Symfony, Slim discoverers
 │   │   └── Model/             # Endpoint, Finding, ScanResult, Enums
-│   ├── Rules/                 # 8 security rules + engine
+│   ├── Rules/                 # 9 security rules + engine
 │   ├── Output/                # Terminal, JSON, Markdown formatters
 │   └── Command/               # CLI scan command
 ├── tests/

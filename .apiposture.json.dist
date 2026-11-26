@@ -12,7 +12,8 @@
         "AP005": { "enabled": true },
         "AP006": { "enabled": true },
         "AP007": { "enabled": true },
-        "AP008": { "enabled": true }
+        "AP008": { "enabled": true },
+        "AP201": { "enabled": true }
     },
     "display": {
         "useColors": true,
